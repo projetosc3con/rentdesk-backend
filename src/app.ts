@@ -11,6 +11,7 @@ import clientRoutes from './routes/clientRoutes';
 import partRoutes from './routes/partRoutes';
 import serviceOrderRoutes from './routes/serviceOrderRoutes';
 import userRoutes from './routes/userRoutes';
+import exportRoutes from './routes/exportRoutes';
 
 dotenv.config();
 
@@ -35,6 +36,7 @@ app.use('/api/clients', authenticate, clientRoutes);
 app.use('/api/parts', authenticate, partRoutes);
 app.use('/api/service-orders', authenticate, serviceOrderRoutes);
 app.use('/api/users', authenticate, userRoutes);
+app.use('/api/exports', authenticate, exportRoutes);
 
 app.listen(PORT, () => {
   console.log(`RentDesk Backend running on http://localhost:${PORT}`);
