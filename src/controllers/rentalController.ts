@@ -5,13 +5,97 @@ import { getSupabaseUserClient } from '../config/supabase';
 export const getAllInvoices = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
-    const { data, error } = await supabase
+
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 15));
+    const from = (page - 1) * limit;
+    const to = from + limit - 1;
+
+    // Extract filter params
+    const search = (req.query.search as string) || '';
+    const billingStatus = (req.query.billing_status as string) || '';
+    const reconciliationStatus = (req.query.reconciliation_status as string) || '';
+    const dateFrom = (req.query.date_from as string) || '';
+    const dateTo = (req.query.date_to as string) || '';
+    const valueMin = parseFloat(req.query.value_min as string) || 0;
+    const valueMax = parseFloat(req.query.value_max as string) || 0;
+
+    let query = supabase
       .from('rental_invoices')
-      .select('*')
-      .order('created_at', { ascending: false });
+      .select('*', { count: 'exact' });
+
+    // Full-text search across multiple columns
+    if (search) {
+      query = query.or(
+        `client_name.ilike.%${search}%,equipment_name.ilike.%${search}%,asset_number.ilike.%${search}%,invoice_number.ilike.%${search}%`
+      );
+    }
+
+    // Status filters
+    if (billingStatus) {
+      query = query.eq('billing_status', billingStatus);
+    }
+    if (reconciliationStatus) {
+      query = query.eq('reconciliation_status', reconciliationStatus);
+    }
+
+    // Date range filter (on billing_period_start)
+    if (dateFrom) {
+      query = query.gte('billing_period_start', dateFrom);
+    }
+    if (dateTo) {
+      query = query.lte('billing_period_start', dateTo);
+    }
+
+    // Value range filter
+    if (valueMin > 0) {
+      query = query.gte('total_value', valueMin);
+    }
+    if (valueMax > 0) {
+      query = query.lte('total_value', valueMax);
+    }
+
+    const { data, error, count } = await query
+      .order('created_at', { ascending: false })
+      .range(from, to);
 
     if (error) throw error;
-    return res.json(data);
+
+    // Fetch extra stats for the cards
+    // 1. Pending Reconciliation Count (No prazo or Atrasado)
+    const { count: pendingCount } = await supabase
+      .from('rental_invoices')
+      .select('*', { count: 'exact', head: true })
+      .or('reconciliation_status.eq.No prazo,reconciliation_status.eq.Atrasado');
+
+    // 2. Monthly Received Total
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString();
+
+    const { data: receivedData } = await supabase
+      .from('rental_invoices')
+      .select('total_value')
+      .eq('reconciliation_status', 'Recebido')
+      .gte('bank_reconciliation_date', startOfMonth)
+      .lte('bank_reconciliation_date', endOfMonth);
+
+    const monthlyReceivedTotal = (receivedData || []).reduce((acc, curr) => acc + Number(curr.total_value || 0), 0);
+
+    const total = count ?? 0;
+    const totalPages = Math.ceil(total / limit);
+
+    return res.json({
+      data,
+      total,
+      page,
+      limit,
+      totalPages,
+      stats: {
+        pendingReconciliationCount: pendingCount || 0,
+        monthlyReceivedTotal
+      }
+    });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
