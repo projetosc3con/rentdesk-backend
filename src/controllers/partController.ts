@@ -37,6 +37,28 @@ export const getPartById = async (req: AuthRequest, res: Response) => {
 export const createPart = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
+    const { part_number, internal_code } = req.body;
+
+    const conditions = [];
+    if (part_number) conditions.push(`part_number.eq.${part_number}`);
+    if (internal_code) conditions.push(`internal_code.eq.${internal_code}`);
+
+    if (conditions.length > 0) {
+      const { data: existingParts, error: searchError } = await supabase
+        .from('parts')
+        .select('internal_code, description, part_number')
+        .or(conditions.join(','));
+
+      if (searchError) throw searchError;
+
+      if (existingParts && existingParts.length > 0) {
+        const existing = existingParts[0];
+        return res.status(400).json({
+          error: `Uma peça já existe com esses dados:\nCódigo: ${existing.internal_code} | PN: ${existing.part_number || 'N/A'} | ${existing.description}`
+        });
+      }
+    }
+
     const { data, error } = await supabase
       .from('parts')
       .insert([req.body])
