@@ -39,6 +39,7 @@ export const getTaskTypes = async (req: AuthRequest, res: Response) => {
     const { data, error } = await supabase
       .from('crm_task_types')
       .select('*')
+      .eq('active', true)
       .order('name', { ascending: true });
 
     if (error) throw error;
@@ -182,7 +183,7 @@ export const createLead = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
     const { contacts, ...leadData } = req.body;
-    
+
     // Insert lead
     const { data: lead, error: leadError } = await supabase
       .from('crm_leads')
@@ -225,9 +226,9 @@ export const updateLead = async (req: AuthRequest, res: Response) => {
       .select('owner_id')
       .eq('id', id)
       .single();
-      
+
     if (existingLeadError) throw existingLeadError;
-    
+
     if (req.profile?.access_level === 'Comercial' && existingLead.owner_id !== req.user?.id) {
       return res.status(403).json({ error: 'Acesso negado. Você só pode editar leads que pertencem a você.' });
     }
@@ -244,7 +245,7 @@ export const updateLead = async (req: AuthRequest, res: Response) => {
     if (contacts) {
       // Simplesmente apagamos e reinserimos os contatos
       await supabase.from('crm_contacts').delete().eq('lead_id', id);
-      
+
       if (contacts.length > 0) {
         const contactsToInsert = contacts.map((c: any) => {
           const { id: contactId, created_at, lead_id, ...contactData } = c; // remove campos que não devem ser inseridos
@@ -256,11 +257,11 @@ export const updateLead = async (req: AuthRequest, res: Response) => {
         const { error: contactsError } = await supabase
           .from('crm_contacts')
           .insert(contactsToInsert);
-        
+
         if (contactsError) throw contactsError;
       }
     }
-    
+
     res.json(lead);
   } catch (error: any) {
     console.error('[crmController] Erro em updateLead:', error);
@@ -287,6 +288,90 @@ export const getLeadContacts = async (req: AuthRequest, res: Response) => {
   }
 };
 
+export const getAllContacts = async (req: AuthRequest, res: Response) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('crm_contacts')
+      .select(`
+        *,
+        lead:crm_leads(company_name),
+        client:clients(company_name)
+      `)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    const formattedContacts = data.map(contact => ({
+      ...contact,
+      company_name: contact.client?.company_name || contact.lead?.company_name || 'Sem vínculo',
+      contact_type: contact.client_id ? 'client' : 'lead'
+    }));
+
+    res.json(formattedContacts);
+  } catch (error: any) {
+    console.error('[crmController] Erro em getAllContacts:', error);
+    res.status(500).json({ error: error.message || 'Erro interno do servidor', details: error });
+  }
+};
+
+export const createContact = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { data, error } = await supabase
+      .from('crm_contacts')
+      .insert([req.body])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (error: any) {
+    console.error('[crmController] Erro em createContact:', error);
+    res.status(500).json({ error: error.message || 'Erro interno do servidor', details: error });
+  }
+};
+
+export const updateContact = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { id } = req.params;
+    const { data, error } = await supabase
+      .from('crm_contacts')
+      .update(req.body)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error: any) {
+    console.error('[crmController] Erro em updateContact:', error);
+    res.status(500).json({ error: error.message || 'Erro interno do servidor', details: error });
+  }
+};
+
+export const deleteContact = async (req: AuthRequest, res: Response) => {
+  try {
+    // Check permission - only full access users can delete
+    if (req.profile?.access_level !== 'Administrador' && req.profile?.access_level !== 'Gestor') {
+      return res.status(403).json({ error: 'Acesso negado. Você não tem permissão para excluir contatos.' });
+    }
+
+    const supabase = getSupabaseUserClient(req.token!);
+    const { id } = req.params;
+    const { error } = await supabase
+      .from('crm_contacts')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+    res.status(204).send();
+  } catch (error: any) {
+    console.error('[crmController] Erro em deleteContact:', error);
+    res.status(500).json({ error: error.message || 'Erro interno do servidor', details: error });
+  }
+};
+
 export const convertLead = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
@@ -300,7 +385,7 @@ export const convertLead = async (req: AuthRequest, res: Response) => {
       .single();
 
     if (fetchError) throw fetchError;
-    
+
     if (req.profile?.access_level === 'Comercial' && lead.owner_id !== req.user?.id) {
       return res.status(403).json({ error: 'Acesso negado. Você só pode converter leads que pertencem a você.' });
     }
@@ -324,7 +409,7 @@ export const convertLead = async (req: AuthRequest, res: Response) => {
           const response = await fetch(`https://api.opencnpj.org/${unmaskedCnpj}`);
           if (response.ok) {
             const data: any = await response.json();
-            
+
             const tipo_logradouro = data.tipo_logradouro || '';
             const logradouro = data.logradouro || '';
             const numero = data.numero || '';
@@ -390,4 +475,217 @@ export const convertLead = async (req: AuthRequest, res: Response) => {
     res.status(500).json({ error: error.message || 'Erro interno do servidor', details: error });
   }
 };
+
+// Deals
+export const getDeals = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { data, error } = await supabase
+      .from('crm_deals')
+      .select('*, lead:crm_leads(company_name), client:clients(company_name), owner:users_profiles!owner_id(full_name, photo_url)')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error: any) {
+    console.error('[crmController] Erro em getDeals:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const createDeal = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const dealData = { ...req.body };
+
+    if (!dealData.owner_id) {
+      dealData.owner_id = req.user?.id;
+    }
+
+    // Clean empty relationships
+    if (!dealData.lead_id) dealData.lead_id = null;
+    if (!dealData.client_id) dealData.client_id = null;
+
+    const { data: deal, error } = await supabase
+      .from('crm_deals')
+      .insert([dealData])
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Log initial stage
+    if (deal.stage_id) {
+      await supabase.from('crm_deal_activities').insert([{
+        deal_id: deal.id,
+        activity_type: 'stage_change',
+        description: 'Negociação iniciada',
+        stage_to_id: deal.stage_id,
+        performed_by: req.user?.id
+      }]);
+    }
+
+    res.status(201).json(deal);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const updateDeal = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { id } = req.params;
+    const dealData = { ...req.body };
+
+    // Check if stage is being changed
+    let oldStageId = null;
+    if (dealData.stage_id) {
+      const { data: currentDeal } = await supabase
+        .from('crm_deals')
+        .select('stage_id')
+        .eq('id', id)
+        .single();
+      
+      oldStageId = currentDeal?.stage_id;
+    }
+
+    const { data: updatedDeal, error } = await supabase
+      .from('crm_deals')
+      .update(dealData)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // If stage changed, log it
+    if (dealData.stage_id && dealData.stage_id !== oldStageId) {
+      await supabase.from('crm_deal_activities').insert([{
+        deal_id: id,
+        activity_type: 'stage_change',
+        description: 'Alteração de etapa',
+        stage_from_id: oldStageId,
+        stage_to_id: dealData.stage_id,
+        performed_by: req.user?.id
+      }]);
+    }
+
+    res.json(updatedDeal);
+  } catch (error: any) {
+    console.error('[crmController] Erro em updateDeal:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const deleteDeal = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { id } = req.params;
+
+    const { error } = await supabase
+      .from('crm_deals')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+    res.json({ message: 'Negociação excluída com sucesso' });
+  } catch (error: any) {
+    console.error('[crmController] Erro em deleteDeal:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const getDealActivities = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { data, error } = await supabase
+      .from('crm_deal_activities')
+      .select(`
+        *,
+        deal:crm_deals(title),
+        performer:users_profiles!performed_by(full_name, photo_url),
+        stage_from:crm_pipeline_stages!stage_from_id(name),
+        stage_to:crm_pipeline_stages!stage_to_id(name)
+      `)
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error: any) {
+    console.error('[crmController] Erro em getDealActivities:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const getTasks = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { data, error } = await supabase
+      .from('crm_tasks')
+      .select(`
+        *,
+        type:crm_task_types(name),
+        deal:crm_deals(title),
+        assignee:users_profiles!assigned_to(full_name, photo_url)
+      `)
+      .order('due_date', { ascending: true });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error: any) {
+    console.error('[crmController] Erro em getTasks:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+
+export const createTask = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const taskData = { 
+      ...req.body,
+      created_by: req.user?.id 
+    };
+
+    const { data, error } = await supabase
+      .from('crm_tasks')
+      .insert([taskData])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error: any) {
+    console.error('[crmController] Erro em createTask:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const updateTask = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { id } = req.params;
+    const updateData = { 
+      ...req.body,
+      updated_at: new Date().toISOString()
+    };
+
+    const { data, error } = await supabase
+      .from('crm_tasks')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error: any) {
+    console.error('[crmController] Erro em updateTask:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+
+
 
