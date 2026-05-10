@@ -269,6 +269,33 @@ export const updateLead = async (req: AuthRequest, res: Response) => {
   }
 };
 
+export const deleteLead = async (req: AuthRequest, res: Response) => {
+  try {
+    // Verificar permissão - apenas ADM ou Gerente podem excluir leads completamente
+    if (req.profile?.access_level !== 'Administrador' && req.profile?.access_level !== 'Gerente') {
+      return res.status(403).json({ error: 'Acesso negado. Você não tem permissão para excluir leads.' });
+    }
+
+    const supabase = getSupabaseUserClient(req.token!);
+    const { id } = req.params;
+
+    // Supabase will handle cascade delete if configured, or we can do it manually.
+    // Based on create/updateLead, contacts are related to leads.
+    await supabase.from('crm_contacts').delete().eq('lead_id', id);
+
+    const { error } = await supabase
+      .from('crm_leads')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+    res.status(204).send();
+  } catch (error: any) {
+    console.error('[crmController] Erro em deleteLead:', error);
+    res.status(500).json({ error: error.message || 'Erro interno do servidor' });
+  }
+};
+
 export const getLeadContacts = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
@@ -539,6 +566,8 @@ export const updateDeal = async (req: AuthRequest, res: Response) => {
 
     // Check if stage is being changed
     let oldStageId = null;
+    let targetStageInfo: { is_won?: boolean; is_lost?: boolean } | null = null;
+
     if (dealData.stage_id) {
       const { data: currentDeal } = await supabase
         .from('crm_deals')
@@ -547,6 +576,26 @@ export const updateDeal = async (req: AuthRequest, res: Response) => {
         .single();
       
       oldStageId = currentDeal?.stage_id;
+
+      // Fetch target stage flags
+      const { data: targetStage } = await supabase
+        .from('crm_pipeline_stages')
+        .select('is_won, is_lost')
+        .eq('id', dealData.stage_id)
+        .single();
+
+      targetStageInfo = targetStage;
+
+      if (targetStage) {
+        if (targetStage.is_won || targetStage.is_lost) {
+          // Stage is terminal → set closed_at
+          dealData.closed_at = new Date().toISOString();
+        } else {
+          // Stage is regular → reset closed_at and lost_reason
+          dealData.closed_at = null;
+          dealData.lost_reason = null;
+        }
+      }
     }
 
     const { data: updatedDeal, error } = await supabase
@@ -570,7 +619,11 @@ export const updateDeal = async (req: AuthRequest, res: Response) => {
       }]);
     }
 
-    res.json(updatedDeal);
+    // Return enriched response with stage flags for frontend
+    res.json({
+      ...updatedDeal,
+      _stageInfo: targetStageInfo || null
+    });
   } catch (error: any) {
     console.error('[crmController] Erro em updateDeal:', error);
     res.status(500).json({ error: error.message });
@@ -686,6 +739,74 @@ export const updateTask = async (req: AuthRequest, res: Response) => {
   }
 };
 
+export const deleteTask = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { id } = req.params;
 
+    // Se for Comercial, verificar se ele criou a tarefa
+    if (req.profile?.access_level === 'Comercial') {
+      const { data: task, error: fetchError } = await supabase
+        .from('crm_tasks')
+        .select('created_by')
+        .eq('id', id)
+        .single();
 
+      if (fetchError) throw fetchError;
 
+      if (task.created_by !== req.user?.id) {
+        return res.status(403).json({ error: 'Acesso negado. Você só pode excluir tarefas criadas por você.' });
+      }
+    }
+
+    const { error } = await supabase
+      .from('crm_tasks')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+    res.status(204).send();
+  } catch (error: any) {
+    console.error('[crmController] Erro em deleteTask:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const checkCnpj = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { cnpj } = req.params;
+    const unmasked = cnpj.replace(/\D/g, '');
+
+    if (unmasked.length < 14) {
+      return res.json({ exists: false });
+    }
+
+    // Buscar em leads
+    const { data: lead } = await supabase
+      .from('crm_leads')
+      .select('id, company_name')
+      .or(`cnpj.ilike.%${unmasked}%,cnpj.eq.${unmasked}`)
+      .limit(1);
+
+    if (lead && lead.length > 0) {
+      return res.json({ exists: true, type: 'lead', name: lead[0].company_name });
+    }
+
+    // Buscar em clientes
+    const { data: client } = await supabase
+      .from('clients')
+      .select('id, company_name')
+      .or(`cnpj.ilike.%${unmasked}%,cnpj.eq.${unmasked}`)
+      .limit(1);
+
+    if (client && client.length > 0) {
+      return res.json({ exists: true, type: 'client', name: client[0].company_name });
+    }
+
+    res.json({ exists: false });
+  } catch (error: any) {
+    console.error('[crmController] Erro em checkCnpj:', error);
+    res.status(500).json({ error: error.message });
+  }
+};

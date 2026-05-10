@@ -14,6 +14,7 @@ import {
   updateContact,
   deleteContact,
   convertLead,
+  deleteLead,
   getDeals,
   createDeal,
   updateDeal,
@@ -21,7 +22,9 @@ import {
   getDealActivities,
   getTasks,
   createTask,
-  updateTask
+  updateTask,
+  deleteTask,
+  checkCnpj
 } from '../controllers/crmController';
 
 const router = Router();
@@ -44,6 +47,8 @@ router.post('/leads', createLead);
 router.put('/leads/:id', updateLead);
 router.get('/leads/:id/contacts', getLeadContacts);
 router.post('/leads/:id/convert', convertLead);
+router.delete('/leads/:id', deleteLead);
+router.get('/leads/check-cnpj/:cnpj', checkCnpj);
 
 
 // Task Types
@@ -61,5 +66,6 @@ router.get('/tasks', getTasks);
 router.get('/tasks/types', getTaskTypes);
 router.post('/tasks', createTask);
 router.patch('/tasks/:id', updateTask);
+router.delete('/tasks/:id', deleteTask);
 
 export default router;

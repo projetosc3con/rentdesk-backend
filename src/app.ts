@@ -31,6 +31,11 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Public routes (no auth required - primeiro acesso)
+import { checkEmailForSignup, completeSignup } from './controllers/userController';
+app.post('/api/auth/check-email', checkEmailForSignup);
+app.post('/api/auth/complete-signup', completeSignup);
+
 // Protected routes
 app.use('/api/rentals', authenticate, rentalRoutes);
 app.use('/api/equipments', authenticate, equipmentRoutes);
