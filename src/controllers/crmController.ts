@@ -776,7 +776,7 @@ export const checkCnpj = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
     const { cnpj } = req.params;
-    const unmasked = cnpj.replace(/\D/g, '');
+    const unmasked = (cnpj as string).replace(/\D/g, '');
 
     if (unmasked.length < 14) {
       return res.json({ exists: false });
