@@ -1,4 +1,5 @@
 import { Response } from 'express';
+import axios from 'axios';
 import { AuthRequest } from '../middleware/auth';
 import { getSupabaseUserClient, supabaseAdmin } from '../config/supabase';
 // Pipelines
@@ -425,7 +426,6 @@ export const convertLead = async (req: AuthRequest, res: Response) => {
     let clientData: any = {
       company_name: lead.company_name,
       cnpj: lead.cnpj || '',
-      segment: lead.segment || '',
       active: true
     };
 
@@ -433,9 +433,9 @@ export const convertLead = async (req: AuthRequest, res: Response) => {
       const unmaskedCnpj = lead.cnpj.replace(/\D/g, '');
       if (unmaskedCnpj.length === 14) {
         try {
-          const response = await fetch(`https://api.opencnpj.org/${unmaskedCnpj}`);
-          if (response.ok) {
-            const data: any = await response.json();
+          const response = await axios.get(`https://api.opencnpj.org/${unmaskedCnpj}`);
+          if (response.status === 200) {
+            const data = response.data;
 
             const tipo_logradouro = data.tipo_logradouro || '';
             const logradouro = data.logradouro || '';
@@ -446,14 +446,22 @@ export const convertLead = async (req: AuthRequest, res: Response) => {
             const cepStr = (data.cep || '').replace(/\D/g, '');
             const cep_formatado = cepStr.length === 8 ? `${cepStr.slice(0, 5)}-${cepStr.slice(5)}` : data.cep || '';
             const address_street = `${tipo_logradouro} ${logradouro}`.trim();
-            const address_complement = `${tipo_logradouro} ${logradouro} Nº ${numero}, ${bairro}, ${municipio} - ${uf} CEP: ${cep_formatado}`.trim();
+            
+            // Construir complemento apenas com o que existe
+            const address_parts = [];
+            if (address_street) address_parts.push(address_street);
+            if (numero) address_parts.push(`Nº ${numero}`);
+            if (bairro) address_parts.push(bairro);
+            if (municipio) address_parts.push(municipio);
+            if (uf) address_parts.push(uf);
+            if (cep_formatado) address_parts.push(`CEP: ${cep_formatado}`);
 
             clientData = {
               ...clientData,
               company_name: data.razao_social || data.razao_scoial || lead.company_name,
               address_street,
               address_number: numero,
-              address_complement,
+              address_complement: address_parts.join(', '),
               address_city: municipio,
               address_state: uf,
               address_zip: cep_formatado,
@@ -777,6 +785,7 @@ export const checkCnpj = async (req: AuthRequest, res: Response) => {
     const supabase = getSupabaseUserClient(req.token!);
     const { cnpj } = req.params;
     const unmasked = (cnpj as string).replace(/\D/g, '');
+    const masked = unmasked.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5");
 
     if (unmasked.length < 14) {
       return res.json({ exists: false });
@@ -786,7 +795,7 @@ export const checkCnpj = async (req: AuthRequest, res: Response) => {
     const { data: lead } = await supabase
       .from('crm_leads')
       .select('id, company_name')
-      .or(`cnpj.ilike.%${unmasked}%,cnpj.eq.${unmasked}`)
+      .or(`cnpj.eq.${unmasked},cnpj.eq.${masked}`)
       .limit(1);
 
     if (lead && lead.length > 0) {
@@ -797,7 +806,7 @@ export const checkCnpj = async (req: AuthRequest, res: Response) => {
     const { data: client } = await supabase
       .from('clients')
       .select('id, company_name')
-      .or(`cnpj.ilike.%${unmasked}%,cnpj.eq.${unmasked}`)
+      .or(`cnpj.eq.${unmasked},cnpj.eq.${masked}`)
       .limit(1);
 
     if (client && client.length > 0) {
