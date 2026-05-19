@@ -24,7 +24,13 @@ import {
   createTask,
   updateTask,
   deleteTask,
-  checkCnpj
+  checkCnpj,
+  getContractForm,
+  saveContractForm,
+  generateContractRecord,
+  getContracts,
+  uploadSignedContract,
+  deleteContractRecord
 } from '../controllers/crmController';
 
 const router = Router();
@@ -61,6 +67,14 @@ router.put('/deals/:id', updateDeal);
 router.delete('/deals/:id', deleteDeal);
 router.get('/deals/activities', getDealActivities);
 
+// Deal Contracts
+router.get('/deals/:id/contract-form', getContractForm);
+router.put('/deals/:id/contract-form', saveContractForm);
+router.post('/deals/:id/contract/generate', generateContractRecord);
+router.get('/deals/:id/contracts', getContracts);
+router.post('/deals/:id/contract/upload', uploadSignedContract);
+router.delete('/deals/:id/contract/:contractId', deleteContractRecord);
+
 // Tasks
 router.get('/tasks', getTasks);
 router.get('/tasks/types', getTaskTypes);
@@ -69,3 +83,4 @@ router.patch('/tasks/:id', updateTask);
 router.delete('/tasks/:id', deleteTask);
 
 export default router;
+

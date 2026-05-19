@@ -819,3 +819,262 @@ export const checkCnpj = async (req: AuthRequest, res: Response) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+// --- CONTRACTS ---
+export const getContractForm = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const dealId = req.params.id;
+
+    const { data: form, error } = await supabase
+      .from('crm_deal_contract_forms')
+      .select('*')
+      .eq('deal_id', dealId)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (form) {
+      return res.json(form);
+    }
+
+    // Se não tem form, preenche com os dados do deal e cliente
+    const { data: deal } = await supabase.from('crm_deals').select('*, leads:crm_leads(company_name, cnpj), clients(company_name, cnpj, state_subscription, address_street, address_number, address_city, address_state)').eq('id', dealId).single();
+    if (!deal) return res.status(404).json({ error: 'Deal não encontrado' });
+
+    const entity = deal.clients || deal.leads || {};
+    
+    res.json({
+      deal_id: dealId,
+      contract_date: new Date().toISOString().split('T')[0],
+      locatario_company_name: entity.company_name || '',
+      locatario_cnpj: entity.cnpj || '',
+      locatario_state_registration: entity.state_registration || '',
+      locatario_address_full: entity.address_full || (entity.address_street ? `${entity.address_street}, ${entity.address_number} - ${entity.address_city}/${entity.address_state}` : ''),
+      equipment_description: '',
+      equipment_model: '',
+      contract_duration_days: 0,
+      period_start: deal.expected_close_date ? new Date(deal.expected_close_date).toISOString().split('T')[0] : '',
+      period_end: '',
+      cost_rental: Number(deal.value) || 0,
+      cost_insurance: 0,
+      cost_freight: 0,
+      cost_rcd: 0,
+      cost_third_party: 0,
+      cost_training: 0,
+      cost_total: Number(deal.value) || 0,
+      billing_interval_days: 28,
+      work_site: '',
+      site_contact_name: '',
+      site_contact_phone: '',
+      notes: '',
+      form_status: 'Rascunho'
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const saveContractForm = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const dealId = req.params.id;
+    const body = req.body;
+    
+    // Sanitize body
+    delete body.id;
+    delete body.created_at;
+    delete body.updated_at;
+    delete body.created_by;
+    
+    body.deal_id = dealId;
+    body.updated_by = req.user?.id;
+
+    // Sanitize dates
+    if (!body.contract_date) body.contract_date = new Date().toISOString().split('T')[0];
+    if (body.period_start === '') body.period_start = null;
+    if (body.period_end === '') body.period_end = null;
+
+    const { data: existing } = await supabase.from('crm_deal_contract_forms').select('id').eq('deal_id', dealId).maybeSingle();
+
+    if (existing) {
+      body.updated_at = new Date().toISOString();
+      const { data, error } = await supabase.from('crm_deal_contract_forms').update(body).eq('id', existing.id).select().single();
+      if (error) throw error;
+      res.json(data);
+    } else {
+      body.created_by = req.user?.id;
+      const { data, error } = await supabase.from('crm_deal_contract_forms').insert(body).select().single();
+      if (error) throw error;
+      
+      await supabase.from('crm_deals').update({ contract_form_id: data.id }).eq('id', dealId);
+      res.json(data);
+    }
+  } catch (error: any) {
+    console.error('Error saving contract form:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const generateContractRecord = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const dealId = req.params.id;
+
+    const { data: form, error: formError } = await supabase.from('crm_deal_contract_forms').select('*').eq('deal_id', dealId).single();
+    if (formError || !form) throw new Error('Formulário não encontrado');
+    if (form.form_status === 'Rascunho') throw new Error('Preencha os campos obrigatórios');
+
+    const { data: settings } = await supabase.from('erp_company_settings').select('*').eq('active', true).single();
+
+    const snapshot = {
+      contract_date: form.contract_date,
+      locador: settings ? {
+        company_name: settings.company_name,
+        cnpj: settings.cnpj,
+        state_registration: settings.state_registration,
+        address_full: settings.address_full,
+        logo_url: settings.logo_url,
+        bank_name: settings.bank_name,
+        bank_code: settings.bank_code,
+        bank_agency: settings.bank_agency,
+        bank_account: settings.bank_account,
+        bank_pix_key: settings.bank_pix_key
+      } : {},
+      locatario: {
+        company_name: form.locatario_company_name,
+        cnpj: form.locatario_cnpj,
+        state_registration: form.locatario_state_registration,
+        address_full: form.locatario_address_full
+      },
+      equipment: {
+        description: form.equipment_description,
+        model: form.equipment_model
+      },
+      contract_duration_days: form.contract_duration_days,
+      period_start: form.period_start,
+      period_end: form.period_end,
+      costs: {
+        rental: form.cost_rental,
+        insurance: form.cost_insurance,
+        freight: form.cost_freight,
+        rcd: form.cost_rcd,
+        third_party: form.cost_third_party,
+        training: form.cost_training,
+        total: form.cost_total
+      },
+      billing_interval_days: form.billing_interval_days,
+      work_site: form.work_site,
+      site_contact_name: form.site_contact_name,
+      site_contact_phone: form.site_contact_phone,
+      clauses: settings?.contract_clauses || {}
+    };
+
+    const { data: contractNumber } = await supabase.rpc('get_next_contract_number');
+
+    const { count } = await supabase.from('crm_deal_contracts').select('*', { count: 'exact', head: true }).eq('deal_id', dealId);
+    const version = (count || 0) + 1;
+
+    await supabase.from('crm_deal_contracts').update({ status: 'Cancelado' }).eq('deal_id', dealId).neq('status', 'Assinado');
+
+    const { data: record, error: recordError } = await supabase.from('crm_deal_contracts').insert({
+      deal_id: dealId,
+      contract_form_id: form.id,
+      contract_number: contractNumber,
+      version,
+      status: 'Gerado',
+      generated_by: req.user?.id,
+      snapshot: { ...snapshot, contract_number: contractNumber }
+    }).select().single();
+
+    if (recordError) throw recordError;
+
+    await supabase.from('crm_deal_contract_forms').update({ form_status: 'PDF Gerado', updated_by: req.user?.id }).eq('id', form.id);
+
+    res.json({ record, snapshot: { ...snapshot, contract_number: contractNumber } });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const getContracts = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { data, error } = await supabase.from('crm_deal_contracts').select('*').eq('deal_id', req.params.id).order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json(data);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const uploadSignedContract = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const dealId = req.params.id;
+    const { contract_id, file_url } = req.body;
+    
+    // Create signed url
+    const { data: urlData, error: urlError } = await supabase.storage.from('crm-contracts').createSignedUrl(file_url, 60 * 60 * 24 * 365 * 10);
+    if (urlError) throw urlError;
+
+    const { data, error } = await supabase.from('crm_deal_contracts').update({
+      signed_file_url: urlData?.signedUrl,
+      signed_uploaded_at: new Date().toISOString(),
+      signed_uploaded_by: req.user?.id,
+      status: 'Assinado',
+    }).eq('id', contract_id).select().single();
+    if (error) throw error;
+
+    await supabase.from('crm_deals').update({ active_contract_id: contract_id }).eq('id', dealId);
+
+    res.json(data);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const deleteContractRecord = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const dealId = req.params.id;
+    const contractId = req.params.contractId;
+
+    // Fetch the deal to check owner_id
+    const { data: deal, error: dealError } = await supabase
+      .from('crm_deals')
+      .select('owner_id')
+      .eq('id', dealId)
+      .single();
+
+    if (dealError || !deal) {
+      return res.status(404).json({ error: 'Negociação não encontrada' });
+    }
+
+    const isOwner = deal.owner_id === req.user?.id;
+    const hasPrivilegedRole = ['Administrador', 'Diretoria', 'Gerente'].includes(req.profile?.access_level);
+
+    if (!isOwner && !hasPrivilegedRole) {
+      return res.status(403).json({ error: 'Permissão negada para excluir o contrato' });
+    }
+
+    // Reset active_contract_id on the deal if it matches this contract
+    await supabase.from('crm_deals').update({ active_contract_id: null }).eq('id', dealId).eq('active_contract_id', contractId);
+
+    // Delete the contract record
+    const { error: deleteError } = await supabase
+      .from('crm_deal_contracts')
+      .delete()
+      .eq('id', contractId);
+
+    if (deleteError) throw deleteError;
+
+    // Reset form status on contract form back to 'Pronto para Gerar'
+    await supabase.from('crm_deal_contract_forms').update({ form_status: 'Pronto para Gerar' }).eq('deal_id', dealId);
+
+    res.json({ message: 'Contrato excluído com sucesso' });
+  } catch (error: any) {
+    console.error('[crmController] Erro em deleteContractRecord:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
