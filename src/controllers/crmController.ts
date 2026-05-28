@@ -1026,7 +1026,59 @@ export const uploadSignedContract = async (req: AuthRequest, res: Response) => {
     }).eq('id', contract_id).select().single();
     if (error) throw error;
 
-    await supabase.from('crm_deals').update({ active_contract_id: contract_id }).eq('id', dealId);
+    // Fetch the deal's current stage to identify the pipeline
+    let wonStageId = null;
+    let oldStageId = null;
+    const { data: dealRecord } = await supabase
+      .from('crm_deals')
+      .select('stage_id')
+      .eq('id', dealId)
+      .single();
+
+    if (dealRecord?.stage_id) {
+      oldStageId = dealRecord.stage_id;
+      // Find the pipeline_id of this stage
+      const { data: currentStage } = await supabase
+        .from('crm_pipeline_stages')
+        .select('pipeline_id')
+        .eq('id', dealRecord.stage_id)
+        .single();
+
+      if (currentStage?.pipeline_id) {
+        // Find the "Fechado Ganho" (is_won = true) stage in that pipeline
+        const { data: wonStage } = await supabase
+          .from('crm_pipeline_stages')
+          .select('id')
+          .eq('pipeline_id', currentStage.pipeline_id)
+          .eq('is_won', true)
+          .single();
+
+        if (wonStage) {
+          wonStageId = wonStage.id;
+        }
+      }
+    }
+
+    const dealUpdates: any = { active_contract_id: contract_id };
+    if (wonStageId) {
+      dealUpdates.stage_id = wonStageId;
+      dealUpdates.closed_at = new Date().toISOString();
+      dealUpdates.probability_pct = 100;
+    }
+
+    await supabase.from('crm_deals').update(dealUpdates).eq('id', dealId);
+
+    // If stage changed, log the activity
+    if (wonStageId && oldStageId && wonStageId !== oldStageId) {
+      await supabase.from('crm_deal_activities').insert([{
+        deal_id: dealId,
+        activity_type: 'stage_change',
+        description: 'Alteração automática de etapa (Contrato Assinado)',
+        stage_from_id: oldStageId,
+        stage_to_id: wonStageId,
+        performed_by: req.user?.id
+      }]);
+    }
 
     res.json(data);
   } catch (error: any) {
