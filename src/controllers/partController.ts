@@ -39,6 +39,10 @@ export const createPart = async (req: AuthRequest, res: Response) => {
     const supabase = getSupabaseUserClient(req.token!);
     const { part_number, internal_code } = req.body;
 
+    const insertData = { ...req.body };
+    delete insertData.total_value;
+
+
     const conditions = [];
     if (part_number) conditions.push(`part_number.eq.${part_number}`);
     if (internal_code) conditions.push(`internal_code.eq.${internal_code}`);
@@ -61,7 +65,7 @@ export const createPart = async (req: AuthRequest, res: Response) => {
 
     const { data, error } = await supabase
       .from('parts')
-      .insert([req.body])
+      .insert([insertData])
       .select()
       .single();
 
@@ -76,9 +80,12 @@ export const updatePart = async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
   try {
     const supabase = getSupabaseUserClient(req.token!);
+    const updateData = { ...req.body };
+    delete updateData.total_value;
+
     const { data, error } = await supabase
       .from('parts')
-      .update(req.body)
+      .update(updateData)
       .eq('id', id)
       .select()
       .single();

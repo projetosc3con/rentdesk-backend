@@ -36,6 +36,10 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
       return res.status(403).json({ error: 'User profile not found' });
     }
 
+    if (profile.active === false) {
+      return res.status(403).json({ error: 'User account is inactive' });
+    }
+
     req.user = user;
     req.profile = profile;
     req.token = token;

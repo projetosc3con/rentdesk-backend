@@ -2,12 +2,14 @@ import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { getSupabaseUserClient } from '../config/supabase';
 
+const SERVICE_ORDER_SELECT = '*, service_order_parts(*, parts(*)), service_order_labor(*)';
+
 export const getAllServiceOrders = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
     const { data, error } = await supabase
       .from('service_orders')
-      .select('*, service_order_parts(*, parts(*))')
+      .select(SERVICE_ORDER_SELECT)
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -23,7 +25,7 @@ export const getServiceOrderById = async (req: AuthRequest, res: Response) => {
     const supabase = getSupabaseUserClient(req.token!);
     const { data, error } = await supabase
       .from('service_orders')
-      .select('*, service_order_parts(*, parts(*))')
+      .select(SERVICE_ORDER_SELECT)
       .eq('id', id)
       .single();
 
@@ -37,7 +39,28 @@ export const getServiceOrderById = async (req: AuthRequest, res: Response) => {
 export const createServiceOrder = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
-    const { parts, ...osData } = req.body;
+    const { parts, labor, ...osData } = req.body;
+
+    // 0. Validate parts stock availability before doing anything
+    if (parts && Array.isArray(parts) && parts.length > 0) {
+        for (const p of parts) {
+            const { data: part, error: partError } = await supabase
+                .from('parts')
+                .select('quantity, description')
+                .eq('id', p.part_id)
+                .single();
+            
+            if (partError || !part) {
+                return res.status(404).json({ error: `Peça com ID ${p.part_id} não encontrada.` });
+            }
+
+            if ((part.quantity || 0) < p.quantity_used) {
+                return res.status(400).json({ 
+                    error: `Estoque insuficiente para a peça "${part.description}". Estoque disponível: ${part.quantity || 0}, solicitado: ${p.quantity_used}.` 
+                });
+            }
+        }
+    }
 
     // 1. Create the Service Order
     const { data: os, error: osError } = await supabase
@@ -58,11 +81,12 @@ export const createServiceOrder = async (req: AuthRequest, res: Response) => {
 
     // 3. Add parts if provided
     if (parts && Array.isArray(parts) && parts.length > 0) {
-        const partsToInsert = parts.map(p => ({
+        const partsToInsert = parts.map((p: any) => ({
             service_order_id: os.id,
             part_id: p.part_id,
             quantity_used: p.quantity_used,
-            unit_value_at_use: p.unit_value_at_use
+            unit_value_at_use: p.unit_value_at_use,
+            was_used: p.was_used !== undefined ? p.was_used : true
         }));
 
         const { error: partsError } = await supabase
@@ -77,16 +101,222 @@ export const createServiceOrder = async (req: AuthRequest, res: Response) => {
             if (part) {
                 await supabase
                     .from('parts')
-                    .update({ quantity: part.quantity - p.quantity_used })
+                    .update({ quantity: (part.quantity || 0) - p.quantity_used })
                     .eq('id', p.part_id);
             }
         }
+    }
+
+    // 5. Add labor entries if provided
+    if (labor && Array.isArray(labor) && labor.length > 0) {
+        const laborToInsert = labor.map((l: any) => ({
+            service_order_id: os.id,
+            technician_name: l.technician_name,
+            labor_date: l.labor_date || null,
+            start_time: l.start_time || null,
+            end_time: l.end_time || null,
+            labor_type: l.labor_type || 'T'
+        }));
+
+        const { error: laborError } = await supabase
+            .from('service_order_labor')
+            .insert(laborToInsert);
+
+        if (laborError) throw laborError;
     }
 
     return res.status(201).json(os);
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
+};
+
+export const updateServiceOrder = async (req: AuthRequest, res: Response) => {
+    const { id } = req.params;
+    try {
+        const supabase = getSupabaseUserClient(req.token!);
+        const { parts, labor, ...osData } = req.body;
+
+        // Remove read-only fields
+        delete osData.id;
+        delete osData.os_number;
+        delete osData.created_at;
+        delete osData.updated_at;
+        delete osData.service_order_parts;
+        delete osData.service_order_labor;
+
+        // 0. Validate and calculate stock adjustments
+        let oldQuantities: Record<string, number> = {};
+        let newQuantities: Record<string, number> = {};
+        let affectedPartIds: string[] = [];
+        let stockQuantities: Record<string, { quantity: number; description: string }> = {};
+
+        if (parts && Array.isArray(parts)) {
+            // Fetch current parts allocated to this OS
+            const { data: oldParts, error: oldPartsError } = await supabase
+                .from('service_order_parts')
+                .select('part_id, quantity_used')
+                .eq('service_order_id', id);
+
+            if (oldPartsError) throw oldPartsError;
+
+            if (oldParts) {
+                for (const op of oldParts) {
+                    oldQuantities[op.part_id] = op.quantity_used || 0;
+                }
+            }
+
+            for (const np of parts) {
+                newQuantities[np.part_id] = np.quantity_used || 0;
+            }
+
+            affectedPartIds = Array.from(new Set([
+                ...Object.keys(oldQuantities),
+                ...Object.keys(newQuantities)
+            ]));
+
+            if (affectedPartIds.length > 0) {
+                const { data: partsInDb, error: dbError } = await supabase
+                    .from('parts')
+                    .select('id, quantity, description')
+                    .in('id', affectedPartIds);
+                
+                if (dbError) throw dbError;
+
+                if (partsInDb) {
+                    for (const pdb of partsInDb) {
+                        stockQuantities[pdb.id] = {
+                            quantity: pdb.quantity || 0,
+                            description: pdb.description || 'Peça sem descrição'
+                        };
+                    }
+                }
+
+                // Check stock for additions/increases
+                for (const partId of affectedPartIds) {
+                    const oldQty = oldQuantities[partId] || 0;
+                    const newQty = newQuantities[partId] || 0;
+                    const diff = newQty - oldQty;
+
+                    if (diff > 0) {
+                        const dbPart = stockQuantities[partId];
+                        const currentStock = dbPart ? dbPart.quantity : 0;
+                        const partDesc = dbPart ? dbPart.description : `ID: ${partId}`;
+
+                        if (currentStock < diff) {
+                            return res.status(400).json({
+                                error: `Estoque insuficiente para a peça "${partDesc}". Estoque disponível: ${currentStock}, necessário adicional: ${diff}.`
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1. Update the Service Order
+        const { data: os, error: osError } = await supabase
+            .from('service_orders')
+            .update(osData)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (osError) throw osError;
+
+        // 2. Update equipment status based on OS status
+        if (os.equipment_id) {
+            if (os.status === 'Concluída' || os.status === 'Cancelada') {
+                await supabase
+                    .from('equipments')
+                    .update({ status: 'Disponível' })
+                    .eq('id', os.equipment_id);
+            } else {
+                await supabase
+                    .from('equipments')
+                    .update({ status: 'Em Manutenção' })
+                    .eq('id', os.equipment_id);
+            }
+        }
+
+        // 3. Replace parts: update stock, delete old service_order_parts, insert new
+        if (parts && Array.isArray(parts)) {
+            // Apply stock updates
+            for (const partId of affectedPartIds) {
+                const oldQty = oldQuantities[partId] || 0;
+                const newQty = newQuantities[partId] || 0;
+                const diff = newQty - oldQty;
+
+                if (diff !== 0) {
+                    const dbPart = stockQuantities[partId];
+                    const currentStock = dbPart ? dbPart.quantity : 0;
+                    
+                    await supabase
+                        .from('parts')
+                        .update({ quantity: currentStock - diff })
+                        .eq('id', partId);
+                }
+            }
+
+            // Replace service order parts records
+            await supabase
+                .from('service_order_parts')
+                .delete()
+                .eq('service_order_id', id);
+
+            if (parts.length > 0) {
+                const partsToInsert = parts.map((p: any) => ({
+                    service_order_id: id,
+                    part_id: p.part_id,
+                    quantity_used: p.quantity_used,
+                    unit_value_at_use: p.unit_value_at_use,
+                    was_used: p.was_used !== undefined ? p.was_used : true
+                }));
+
+                const { error: partsError } = await supabase
+                    .from('service_order_parts')
+                    .insert(partsToInsert);
+
+                if (partsError) throw partsError;
+            }
+        }
+
+        // 4. Replace labor: delete old, insert new
+        if (labor && Array.isArray(labor)) {
+            await supabase
+                .from('service_order_labor')
+                .delete()
+                .eq('service_order_id', id);
+
+            if (labor.length > 0) {
+                const laborToInsert = labor.map((l: any) => ({
+                    service_order_id: id,
+                    technician_name: l.technician_name,
+                    labor_date: l.labor_date || null,
+                    start_time: l.start_time || null,
+                    end_time: l.end_time || null,
+                    labor_type: l.labor_type || 'T'
+                }));
+
+                const { error: laborError } = await supabase
+                    .from('service_order_labor')
+                    .insert(laborToInsert);
+
+                if (laborError) throw laborError;
+            }
+        }
+
+        // Return full data
+        const { data: fullOS, error: fetchError } = await supabase
+            .from('service_orders')
+            .select(SERVICE_ORDER_SELECT)
+            .eq('id', id)
+            .single();
+
+        if (fetchError) throw fetchError;
+        return res.json(fullOS);
+    } catch (error: any) {
+        return res.status(500).json({ error: error.message });
+    }
 };
 
 export const updateServiceOrderStatus = async (req: AuthRequest, res: Response) => {
@@ -104,7 +334,7 @@ export const updateServiceOrderStatus = async (req: AuthRequest, res: Response) 
 
         if (osError) throw osError;
 
-        // If OS is concluded, update equipment status back to 'Disponível' (or logic could be more complex)
+        // If OS is concluded, update equipment status back to 'Disponível'
         if (status === 'Concluída' && os.equipment_id) {
             await supabase
                 .from('equipments')

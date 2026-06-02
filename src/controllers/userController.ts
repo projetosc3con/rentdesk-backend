@@ -39,6 +39,18 @@ export const updateUserProfile = async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
   try {
     const supabase = getSupabaseUserClient(req.token!);
+    const { active, ...otherData } = req.body;
+
+    if (active !== undefined) {
+      const { error: authError } = await supabaseAdmin.auth.admin.updateUserById(
+        id as string,
+        { ban_duration: active ? 'none' : '87600h' }
+      );
+      if (authError) {
+        console.error('[Backend] Erro ao suspender/reativar usuário no Auth:', authError.message);
+      }
+    }
+
     const { data, error } = await supabase
       .from('users_profiles')
       .update(req.body)
@@ -207,6 +219,56 @@ export const completeSignup = async (req: Request, res: Response) => {
     return res.json({ success: true });
   } catch (error: any) {
     console.error('[Backend] Erro ao completar cadastro:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+export const resetUserPassword = async (req: AuthRequest, res: Response) => {
+  const id = req.params.id as string;
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { data: profile, error: profileError } = await supabase
+      .from('users_profiles')
+      .select('email')
+      .eq('id', id)
+      .single();
+
+    if (profileError || !profile) {
+      return res.status(404).json({ error: 'Usuário não encontrado.' });
+    }
+
+    const { error: resetError } = await supabaseAdmin.auth.resetPasswordForEmail(
+      profile.email,
+      { redirectTo: `${req.headers.origin || 'http://localhost:5173'}/set-password` }
+    );
+
+    if (resetError) throw resetError;
+
+    await supabaseAdmin
+      .from('users_profiles')
+      .update({ password_set: false })
+      .eq('id', id);
+
+    return res.json({ success: true, message: 'E-mail de redefinição de senha enviado.' });
+  } catch (error: any) {
+    console.error('[Backend] Erro ao resetar senha:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+export const getUserProfileById = async (req: AuthRequest, res: Response) => {
+  const id = req.params.id as string;
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { data, error } = await supabase
+      .from('users_profiles')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error) throw error;
+    return res.json(data);
+  } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
 };
