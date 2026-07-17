@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { getSupabaseUserClient } from '../config/supabase';
+import { getSupabaseUserClient, supabaseAdmin } from '../config/supabase';
 
 export const getPositions = async (req: Request, res: Response) => {
   try {
@@ -1393,6 +1393,327 @@ export const clockIn = async (req: Request, res: Response) => {
     res.status(201).json({ record: newRecord, nextType });
   } catch (error: any) {
     console.error('Error clocking in:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};
+
+// ==========================================
+// TREINAMENTOS (TRAININGS)
+// ==========================================
+
+export const getTrainingCatalog = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
+    const token = authHeader.replace('Bearer ', '');
+    const supabase = getSupabaseUserClient(token);
+
+    const { data, error } = await supabase
+      .from('hr_training_catalog')
+      .select('*')
+      .order('name', { ascending: true });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error: any) {
+    console.error('Error fetching training catalog:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};
+
+export const createTrainingCatalog = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
+    const token = authHeader.replace('Bearer ', '');
+    const supabase = getSupabaseUserClient(token);
+
+    const { data, error } = await supabase
+      .from('hr_training_catalog')
+      .insert([req.body])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (error: any) {
+    console.error('Error creating training catalog:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};
+
+export const updateTrainingCatalog = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
+    const token = authHeader.replace('Bearer ', '');
+    const supabase = getSupabaseUserClient(token);
+    
+    const { id } = req.params;
+
+    const { data, error } = await supabase
+      .from('hr_training_catalog')
+      .update(req.body)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error: any) {
+    console.error('Error updating training catalog:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};
+
+export const getEmployeeTrainings = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
+    const token = authHeader.replace('Bearer ', '');
+    const supabase = getSupabaseUserClient(token);
+
+    const { data, error } = await supabase
+      .from('hr_employee_trainings')
+      .select(`
+        *,
+        hr_training_catalog(name, category),
+        users_profiles!user_id(full_name)
+      `)
+      .order('completion_date', { ascending: false });
+
+    if (error) throw error;
+    
+    // Format response to match frontend expectations
+    const formattedData = data.map((t: any) => ({
+      id: t.id,
+      employee: t.users_profiles?.full_name || 'Desconhecido',
+      training: t.hr_training_catalog?.name || 'Desconhecido',
+      date: new Date(t.completion_date + 'T00:00:00').toLocaleDateString('pt-BR'),
+      workload: `${t.workload_hours || 0}h`,
+      status: t.status,
+      file_url: t.certificate_url
+    }));
+
+    res.json(formattedData);
+  } catch (error: any) {
+    console.error('Error fetching employee trainings:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};
+
+export const createEmployeeTraining = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
+    const token = authHeader.replace('Bearer ', '');
+    const { data: userObj, error: userError } = await supabaseAdmin.auth.getUser(token);
+    if (userError || !userObj.user) return res.status(401).json({ error: 'Invalid token' });
+    
+    const registered_by = userObj.user.id;
+
+    const supabase = getSupabaseUserClient(token);
+
+    const { data, error } = await supabase
+      .from('hr_employee_trainings')
+      .insert([{ ...req.body, registered_by }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (error: any) {
+    console.error('Error creating employee training:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};
+
+export const getTrainingMetrics = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
+    const token = authHeader.replace('Bearer ', '');
+    const supabase = getSupabaseUserClient(token);
+
+    const { data, error } = await supabase
+      .from('hr_employee_trainings')
+      .select('workload_hours, cost');
+
+    if (error) throw error;
+    
+    let totalHours = 0;
+    let totalCost = 0;
+    
+    if (data) {
+      for (const item of data) {
+        totalHours += Number(item.workload_hours) || 0;
+        totalCost += Number(item.cost) || 0;
+      }
+    }
+
+    res.json({ totalHours, totalCost });
+  } catch (error: any) {
+    console.error('Error fetching training metrics:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};
+
+// --- INTEGRATIONS ---
+
+export const getIntegrationTypes = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
+    const token = authHeader.replace('Bearer ', '');
+    const supabase = getSupabaseUserClient(token);
+
+    const { data, error } = await supabase
+      .from('hr_integration_types')
+      .select('*')
+      .order('name');
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error: any) {
+    console.error('Error fetching integration types:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};
+
+export const createIntegrationType = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
+    const token = authHeader.replace('Bearer ', '');
+    const supabase = getSupabaseUserClient(token);
+
+    const { data, error } = await supabase
+      .from('hr_integration_types')
+      .insert([req.body])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (error: any) {
+    console.error('Error creating integration type:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};
+
+export const updateIntegrationType = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
+    const token = authHeader.replace('Bearer ', '');
+    const supabase = getSupabaseUserClient(token);
+    
+    const { id } = req.params;
+
+    const { data, error } = await supabase
+      .from('hr_integration_types')
+      .update(req.body)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error: any) {
+    console.error('Error updating integration type:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};
+
+export const getEmployeeIntegrations = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
+    const token = authHeader.replace('Bearer ', '');
+    const supabase = getSupabaseUserClient(token);
+
+    const { data, error } = await supabase
+      .from('hr_employee_integrations')
+      .select(`
+        *,
+        employee:user_id ( full_name ),
+        integration_type:integration_type_id ( name )
+      `)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    const formattedData = data.map((item: any) => ({
+      id: item.id,
+      employee: item.employee?.full_name,
+      type: item.integration_type?.name,
+      client: item.location || 'Não especificado', // Using location instead of client relation for MVP
+      date: item.integration_date ? new Date(item.integration_date).toLocaleDateString('pt-BR') : '-',
+      expiry: item.expiry_date ? new Date(item.expiry_date).toLocaleDateString('pt-BR') : '-',
+      status: item.status,
+      file_url: item.file_url
+    }));
+
+    res.json(formattedData);
+  } catch (error: any) {
+    console.error('Error fetching employee integrations:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};
+
+export const createEmployeeIntegration = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
+    const token = authHeader.replace('Bearer ', '');
+    const { data: userObj, error: userError } = await supabaseAdmin.auth.getUser(token);
+    if (userError || !userObj.user) return res.status(401).json({ error: 'Invalid token' });
+    
+    const registered_by = userObj.user.id;
+    const supabase = getSupabaseUserClient(token);
+
+    const { data, error } = await supabase
+      .from('hr_employee_integrations')
+      .insert([{ ...req.body, registered_by }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (error: any) {
+    console.error('Error creating employee integration:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+};
+
+export const getIntegrationMetrics = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Missing authorization header' });
+    const token = authHeader.replace('Bearer ', '');
+    const supabase = getSupabaseUserClient(token);
+
+    const { data, error } = await supabase
+      .from('hr_employee_integrations')
+      .select('status');
+
+    if (error) throw error;
+    
+    let valid = 0;
+    let expired = 0;
+    let expiring = 0;
+    
+    if (data) {
+      for (const item of data) {
+        if (item.status === 'Válida') valid++;
+        else if (item.status === 'Vencida') expired++;
+        else if (item.status === 'A Vencer') expiring++;
+      }
+    }
+
+    res.json({ valid, expired, expiring, total: valid + expired + expiring });
+  } catch (error: any) {
+    console.error('Error fetching integration metrics:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 };

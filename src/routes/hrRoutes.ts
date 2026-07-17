@@ -13,6 +13,12 @@ import {
   getEmployeeVacationRequests, createVacationRequest,
   // EPI
   getEpiCatalog, getEmployeeEpiRecords, createEpiRecord,
+  // Treinamentos
+  getTrainingCatalog, createTrainingCatalog, updateTrainingCatalog,
+  getEmployeeTrainings, createEmployeeTraining, getTrainingMetrics,
+  // Integrations
+  getIntegrationTypes, createIntegrationType, updateIntegrationType,
+  getEmployeeIntegrations, createEmployeeIntegration, getIntegrationMetrics,
 } from '../controllers/hrController';
 
 const router = Router();
@@ -62,5 +68,21 @@ router.post('/employee-documents', createEmployeeDocument);
 
 // EPI Catalog
 router.get('/epi-catalog', getEpiCatalog);
+
+// Trainings
+router.get('/trainings/catalog', getTrainingCatalog);
+router.post('/trainings/catalog', createTrainingCatalog);
+router.put('/trainings/catalog/:id', updateTrainingCatalog);
+router.get('/trainings/metrics', getTrainingMetrics);
+router.get('/trainings', getEmployeeTrainings);
+router.post('/trainings', createEmployeeTraining);
+
+// Integrations
+router.get('/integrations/types', getIntegrationTypes);
+router.post('/integrations/types', createIntegrationType);
+router.put('/integrations/types/:id', updateIntegrationType);
+router.get('/integrations/metrics', getIntegrationMetrics);
+router.get('/integrations', getEmployeeIntegrations);
+router.post('/integrations', createEmployeeIntegration);
 
 export default router;
