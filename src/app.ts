@@ -16,6 +16,9 @@ import dashboardRoutes from './routes/dashboardRoutes';
 import crmRoutes from './routes/crmRoutes';
 import logisticsRoutes from './routes/logisticsRoutes';
 import hrRoutes from './routes/hrRoutes';
+import asaasWebhookRoutes from './routes/asaasWebhookRoutes';
+import paymentRoutes from './routes/paymentRoutes';
+import serasaRoutes from './routes/serasaRoutes';
 
 dotenv.config();
 
@@ -38,6 +41,9 @@ import { checkEmailForSignup, completeSignup } from './controllers/userControlle
 app.post('/api/auth/check-email', checkEmailForSignup);
 app.post('/api/auth/complete-signup', completeSignup);
 
+// Sem autenticação — chamada server-to-server do Asaas, sem JWT de usuário.
+app.use('/api/webhooks', asaasWebhookRoutes);
+
 // Protected routes
 app.use('/api/rentals', authenticate, rentalRoutes);
 app.use('/api/equipments', authenticate, equipmentRoutes);
@@ -50,6 +56,8 @@ app.use('/api/dashboard', authenticate, dashboardRoutes);
 app.use('/api/crm', authenticate, crmRoutes);
 app.use('/api/logistics', authenticate, logisticsRoutes);
 app.use('/api/hr', authenticate, hrRoutes);
+app.use('/api/payments', authenticate, paymentRoutes);
+app.use('/api/consultar-score', authenticate, serasaRoutes);
 
 app.listen(PORT, () => {
   console.log(`RentDesk Backend running on http://localhost:${PORT}`);
