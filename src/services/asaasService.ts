@@ -41,6 +41,18 @@ class AsaasService {
     return response;
   }
 
+  async getMyAccount(apiKey: string): Promise<any> {
+    const { data: response } = await this.http.get('/v3/myAccount', this.authHeaders(apiKey));
+    return response;
+  }
+
+  async getCustomer(apiKey: string, customerId: string): Promise<AsaasCustomerResponse> {
+    const { data: response } = await this.http.get<AsaasCustomerResponse>(
+      `/v3/customers/${customerId}`, this.authHeaders(apiKey)
+    );
+    return response;
+  }
+
   async createCharge(apiKey: string, data: AsaasChargeRequest): Promise<AsaasPaymentResponse> {
     const { data: response } = await this.http.post<AsaasPaymentResponse>(
       '/v3/payments', data, this.authHeaders(apiKey)
