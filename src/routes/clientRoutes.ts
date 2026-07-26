@@ -13,7 +13,7 @@ router.get('/:id', clientController.getClientById);
 router.post('/', fullAccess, clientController.createClient);
 router.put('/:id', clientController.updateClient); // Assuming Comercial can edit clients as they can access /clientes/:id
 router.post('/:id/asaas-sync', clientController.syncClientAsaas);
-router.get('/:id/asaas-verify', clientController.verifyClientAsaas);
+router.get('/:id/asaas-verify', fullAccess, clientController.verifyClientAsaas);
 router.delete('/:id', fullAccess, clientController.deleteClient);
 
 export default router;
