@@ -152,3 +152,49 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
     return res.status(500).json({ error: error.message, asaas: error.response?.data });
   }
 };
+
+// Status de pagamento de uma fatura específica — pode haver mais de um
+// registro em `payments` por fatura (ex: reemissão de cobrança).
+export const getInvoicePayments = async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { data, error } = await supabase
+      .from('payments')
+      .select('*')
+      .eq('invoice_id', id)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+
+    return res.json(data);
+  } catch (error: any) {
+    console.error('[getInvoicePayments] Erro:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// Extrato geral de pagamentos, com filtros opcionais via query string.
+export const listPayments = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const { client_id, status, from, to } = req.query;
+
+    let query = supabase
+      .from('payments')
+      .select('*, invoice:rental_invoices(invoice_number, client_name)')
+      .order('created_at', { ascending: false });
+
+    if (client_id) query = query.eq('client_id', client_id as string);
+    if (status) query = query.eq('status', status as string);
+    if (from) query = query.gte('due_date', from as string);
+    if (to) query = query.lte('due_date', to as string);
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    return res.json(data);
+  } catch (error: any) {
+    console.error('[listPayments] Erro:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+};
