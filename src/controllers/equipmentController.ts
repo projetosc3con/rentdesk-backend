@@ -5,13 +5,48 @@ import { getSupabaseUserClient } from '../config/supabase';
 export const getAllEquipments = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
-    const { data, error } = await supabase
+    const { data: equipments, error } = await supabase
       .from('equipments')
       .select('*')
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-    return res.json(data);
+
+    // For equipment with status 'Locado', fetch active rental info
+    const locadoIds = (equipments || [])
+      .filter((e: any) => e.status === 'Locado')
+      .map((e: any) => e.id);
+
+    let rentalMap: Record<string, any> = {};
+    if (locadoIds.length > 0) {
+      const { data: rentals } = await supabase
+        .from('rental_invoices')
+        .select('equipment_id, client_name, billing_period_start, billing_period_end, work_site, billing_status')
+        .in('equipment_id', locadoIds)
+        .neq('billing_status', 'Cancelada')
+        .order('billing_period_end', { ascending: false });
+
+      if (rentals) {
+        for (const r of rentals) {
+          // Keep only the most recent active rental per equipment
+          if (!rentalMap[r.equipment_id]) {
+            rentalMap[r.equipment_id] = {
+              rental_client_name: r.client_name,
+              rental_period_start: r.billing_period_start,
+              rental_period_end: r.billing_period_end,
+              rental_work_site: r.work_site,
+            };
+          }
+        }
+      }
+    }
+
+    const enriched = (equipments || []).map((eq: any) => ({
+      ...eq,
+      ...(rentalMap[eq.id] || {}),
+    }));
+
+    return res.json(enriched);
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
