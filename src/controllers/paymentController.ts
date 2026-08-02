@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { getSupabaseUserClient, supabaseAdmin } from '../config/supabase';
 import { asaasService } from '../services/asaasService';
+import { emailService } from '../services/emailService';
 import { AsaasChargeRequest, AsaasBillingType, AsaasSubaccountRequest, AsaasPaymentResponse } from '../types/asaas';
 import { PaymentBreakdown } from '../types/payment';
 import { AuthRequest } from '../middleware/auth';
@@ -147,7 +148,7 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
 
     const { data: settings, error: settingsError } = await supabaseAdmin
       .from('erp_company_settings')
-      .select('asaas_api_key, asaas_boleto_fee_amount, asaas_pix_fee_percent')
+      .select('asaas_api_key, asaas_boleto_fee_amount, asaas_pix_fee_percent, company_name')
       .eq('active', true)
       .single();
     if (settingsError) {
@@ -215,7 +216,7 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
 
     const { data: client } = await supabase
       .from('clients')
-      .select('asaas_customer_id')
+      .select('asaas_customer_id, email')
       .eq('id', invoice.client_id)
       .single();
     if (!client?.asaas_customer_id) {
@@ -283,11 +284,30 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
 
     const divergent = Math.abs(charge.netValue - invoice.total_value) >= CENTS_TOLERANCE;
 
+    let emailSent = false;
+    if (client.email) {
+      try {
+        await emailService.sendBoletoEmail({
+          to: client.email,
+          clientName: invoice.client_name,
+          companyName: settings.company_name || 'RentDesk',
+          totalValue: invoice.total_value,
+          dueDate: charge.dueDate,
+          invoiceUrl: charge.invoiceUrl || charge.bankSlipUrl || '',
+          bankSlipUrl: charge.bankSlipUrl,
+        });
+        emailSent = true;
+      } catch (emailError: any) {
+        console.error('[createChargeForInvoice] Falha ao enviar e-mail de boleto:', emailError.response?.data || emailError.message);
+      }
+    }
+
     return res.status(201).json({
       invoice_id: invoice.id,
       charge,
       payment,
       breakdown: buildBreakdown(invoice.total_value, feeAmount, chargedValue, charge.netValue),
+      email_sent: emailSent,
       ...(divergent ? { warning: `net_value do Asaas (${charge.netValue}) diverge do total_value da fatura (${invoice.total_value}) — taxa em erp_company_settings pode estar desatualizada` } : {}),
     });
   } catch (error: any) {

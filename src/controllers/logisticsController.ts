@@ -175,9 +175,20 @@ export const finishProcessing = async (req: AuthRequest, res: Response) => {
     const client = deal.client || {};
     const lead = deal.lead || {};
 
+    // Negociação vinculada a Lead (não a Cliente) não tem cadastro faturável
+    // (sem CNPJ validado/asaas_customer_id) — bloqueia aqui em vez de criar
+    // uma fatura órfã (client_id null) que só falharia mais tarde, na hora
+    // de gerar o boleto, com um erro confuso ("Cliente sem cadastro Asaas").
+    const resolvedClientId = client.id || deal.client_id || null;
+    if (!resolvedClientId) {
+      return res.status(400).json({
+        error: 'Este contrato está vinculado a um Lead, não a um Cliente. Converta o Lead em Cliente (CRM → Leads → Converter) antes de finalizar o processamento.'
+      });
+    }
+
     // 1. Create the rental invoice
     const invoicePayload = {
-      client_id: client.id || deal.client_id || null,
+      client_id: resolvedClientId,
       client_name: form.locatario_company_name || lead.company_name || client.company_name || 'N/A',
       cnpj: form.locatario_cnpj || lead.cnpj || client.cnpj || null,
       equipment_id: equipment_id || null,
