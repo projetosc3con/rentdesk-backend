@@ -96,3 +96,31 @@ export interface AsaasWebhookPayload {
   event: string; // ex: 'PAYMENT_RECEIVED', 'PAYMENT_OVERDUE'
   payment: AsaasPaymentResponse;
 }
+
+// --- Nota fiscal de serviço (POST /v3/invoices) --- (best-effort, validar contra doc oficial do Asaas)
+export type AsaasInvoiceStatus =
+  | 'SCHEDULED' | 'SYNCHRONIZED' | 'AUTHORIZED' | 'PROCESSING_CANCELLATION'
+  | 'CANCELLED' | 'CANCELLATION_DENIED' | 'ERROR';
+
+export interface AsaasInvoiceRequest {
+  payment?: string; // asaas_payment_id da cobrança já criada
+  customer?: string; // alternativa sem payment vinculado
+  serviceDescription: string;
+  observations?: string;
+  value: number;
+  deductions?: number;
+  effectiveDate: string; // YYYY-MM-DD
+  municipalServiceCode?: string;
+  taxes?: {
+    retainIss?: boolean;
+    iss?: number; // alíquota, 0 quando isento
+  };
+}
+
+export interface AsaasInvoiceResponse {
+  id: string; // -> persistir em invoice_nfse.external_id
+  status: AsaasInvoiceStatus;
+  pdfUrl?: string;   // -> invoice_nfse.nfse_link
+  xmlUrl?: string;   // -> invoice_nfse.xml_url
+  errors?: { code: string; description: string }[]; // -> invoice_nfse.return_message
+}

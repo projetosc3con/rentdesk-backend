@@ -47,13 +47,27 @@ export const handleAsaasWebhook = async (req: Request, res: Response) => {
 async function markPaymentAsPaid(payload: AsaasWebhookPayload) {
   const { data: payment } = await supabaseAdmin
     .from('payments')
-    .select('id')
+    .select('id, net_value_projected')
     .eq('asaas_payment_id', payload.payment.id)
     .maybeSingle();
 
   if (!payment) {
     console.warn(`[handleAsaasWebhook] Nenhum payment local para asaas_payment_id=${payload.payment.id}`);
     return;
+  }
+
+  // Conciliação: net_value_projected foi calculado na criação da cobrança
+  // (gross-up com a taxa configurada em erp_company_settings). Se o net_value
+  // real do pagamento divergir, a taxa configurada provavelmente ficou
+  // desatualizada — só loga, não bloqueia a baixa do pagamento.
+  const realNetValue = payload.payment.netValue ?? null;
+  if (payment.net_value_projected != null && realNetValue != null
+      && Math.abs(realNetValue - payment.net_value_projected) >= 0.01) {
+    console.warn(
+      `[handleAsaasWebhook] net_value divergente no pagamento ${payment.id}: ` +
+      `projetado=${payment.net_value_projected} real=${realNetValue} ` +
+      `(verificar taxa em erp_company_settings)`
+    );
   }
 
   // Status real do Asaas (ex: RECEIVED, CONFIRMED) — mesmo padrão já usado em
@@ -70,7 +84,7 @@ async function markPaymentAsPaid(payload: AsaasWebhookPayload) {
     .update({
       status: payload.payment.status,
       payment_date: payload.payment.paymentDate ?? null,
-      net_value: payload.payment.netValue ?? null,
+      net_value: realNetValue,
     })
     .eq('id', payment.id);
   if (paymentError) throw paymentError;

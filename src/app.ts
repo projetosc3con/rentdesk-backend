@@ -19,6 +19,7 @@ import hrRoutes from './routes/hrRoutes';
 import asaasWebhookRoutes from './routes/asaasWebhookRoutes';
 import paymentRoutes from './routes/paymentRoutes';
 import serasaRoutes from './routes/serasaRoutes';
+import fiscalRoutes from './routes/fiscalRoutes';
 
 dotenv.config();
 
@@ -58,6 +59,7 @@ app.use('/api/logistics', authenticate, logisticsRoutes);
 app.use('/api/hr', authenticate, hrRoutes);
 app.use('/api/payments', authenticate, paymentRoutes);
 app.use('/api/consultar-score', authenticate, serasaRoutes);
+app.use('/api/fiscal', authenticate, fiscalRoutes);
 
 app.listen(PORT, () => {
   console.log(`RentDesk Backend running on http://localhost:${PORT}`);

@@ -1,12 +1,58 @@
 import { Response } from 'express';
-import { getSupabaseUserClient } from '../config/supabase';
+import { getSupabaseUserClient, supabaseAdmin } from '../config/supabase';
 import { asaasService } from '../services/asaasService';
-import { AsaasChargeRequest, AsaasBillingType, AsaasSubaccountRequest } from '../types/asaas';
+import { AsaasChargeRequest, AsaasBillingType, AsaasSubaccountRequest, AsaasPaymentResponse } from '../types/asaas';
+import { PaymentBreakdown } from '../types/payment';
 import { AuthRequest } from '../middleware/auth';
 
 const REQUIRED_SUBACCOUNT_FIELDS: (keyof AsaasSubaccountRequest)[] = [
   'name', 'email', 'cpfCnpj', 'mobilePhone', 'address', 'addressNumber', 'province', 'postalCode', 'incomeValue',
 ];
+
+// Status que não contam como "cobrança ativa" para fins de idempotência — uma
+// fatura com cobrança CANCELLED/REFUNDED pode receber uma nova cobrança.
+const INACTIVE_PAYMENT_STATUSES = ['CANCELLED', 'REFUNDED'];
+const CENTS_TOLERANCE = 0.01;
+
+interface FeeSettings {
+  asaas_boleto_fee_amount: number | null;
+  asaas_pix_fee_percent: number | null;
+}
+
+// Regra de negócio: o valor líquido recebido pela locadora deve igualar o
+// total_value da fatura, então o valor cobrado é aumentado ("gross-up") pela
+// taxa que o Asaas vai descontar.
+function calculateGrossUp(billingType: AsaasBillingType, totalValue: number, settings: FeeSettings) {
+  const totalCents = Math.round(totalValue * 100);
+
+  if (billingType === 'BOLETO') {
+    if (settings.asaas_boleto_fee_amount == null) {
+      console.warn('[createChargeForInvoice] asaas_boleto_fee_amount não configurado — cobrando sem gross-up');
+      return { feeAmount: 0, chargedValue: totalValue };
+    }
+    const feeCents = Math.round(settings.asaas_boleto_fee_amount * 100);
+    return { feeAmount: feeCents / 100, chargedValue: (totalCents + feeCents) / 100 };
+  }
+
+  if (billingType === 'PIX') {
+    if (settings.asaas_pix_fee_percent == null) {
+      console.warn('[createChargeForInvoice] asaas_pix_fee_percent não configurado — cobrando sem gross-up');
+      return { feeAmount: 0, chargedValue: totalValue };
+    }
+    // Taxa Pix é percentual sobre o valor cobrado (não sobre o total_value):
+    // charged * (1 - pct) = total_value  =>  charged = total_value / (1 - pct)
+    const chargedCents = Math.round(totalCents / (1 - settings.asaas_pix_fee_percent));
+    return { feeAmount: (chargedCents - totalCents) / 100, chargedValue: chargedCents / 100 };
+  }
+
+  // CREDIT_CARD, DEBIT_CARD, TRANSFER, DEPOSIT, UNDEFINED: taxa variável/
+  // percentual de cartão fora de escopo — cobra total_value sem ajuste.
+  return { feeAmount: 0, chargedValue: totalValue };
+}
+
+function buildBreakdown(totalValue: number, feeAmount: number, chargedValue: number, netValue: number | null): PaymentBreakdown {
+  return { total_value: totalValue, fee_amount: feeAmount, charged_value: chargedValue, net_value: netValue };
+}
 
 export const setupSubaccount = async (req: AuthRequest, res: Response) => {
   try {
@@ -19,7 +65,11 @@ export const setupSubaccount = async (req: AuthRequest, res: Response) => {
     const subaccount = await asaasService.createSubaccount(body);
 
     const supabase = getSupabaseUserClient(req.token!);
-    const { data: existingSettings } = await supabase
+    // erp_company_settings é config global single-tenant (não é dado do
+    // usuário) — lida sempre via supabaseAdmin para não depender de RLS e
+    // evitar criar uma segunda linha `active = true` por engano (o insert
+    // abaixo decide com base neste read).
+    const { data: existingSettings } = await supabaseAdmin
       .from('erp_company_settings')
       .select('id')
       .eq('active', true)
@@ -57,12 +107,14 @@ export const setupSubaccount = async (req: AuthRequest, res: Response) => {
 // erp_company_settings.asaas_api_key é válida no Asaas.
 export const verifySubaccount = async (req: AuthRequest, res: Response) => {
   try {
-    const supabase = getSupabaseUserClient(req.token!);
-    const { data: settings } = await supabase
+    const { data: settings, error: settingsError } = await supabaseAdmin
       .from('erp_company_settings')
       .select('asaas_api_key')
       .eq('active', true)
       .single();
+    if (settingsError) {
+      console.error('[verifySubaccount] Erro ao ler erp_company_settings:', settingsError);
+    }
     if (!settings?.asaas_api_key) {
       return res.status(400).json({ error: 'Locadora sem chave Asaas configurada' });
     }
@@ -93,6 +145,74 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
       return res.status(404).json({ error: 'Fatura não encontrada' });
     }
 
+    const { data: settings, error: settingsError } = await supabaseAdmin
+      .from('erp_company_settings')
+      .select('asaas_api_key, asaas_boleto_fee_amount, asaas_pix_fee_percent')
+      .eq('active', true)
+      .single();
+    if (settingsError) {
+      console.error('[createChargeForInvoice] Erro ao ler erp_company_settings:', settingsError);
+    }
+    if (!settings?.asaas_api_key) {
+      return res.status(400).json({ error: 'Locadora sem chave Asaas configurada' });
+    }
+
+    // Idempotência: no máximo uma cobrança ativa por fatura (reforçado por
+    // índice único parcial em `payments`, ver migration 20260731130000).
+    const fetchActivePayment = () =>
+      supabase
+        .from('payments')
+        .select('*')
+        .eq('invoice_id', invoice.id)
+        .not('status', 'in', `(${INACTIVE_PAYMENT_STATUSES.join(',')})`)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    const { data: existingPayment } = await fetchActivePayment();
+    if (existingPayment) {
+      let invoiceUrl = existingPayment.invoice_url;
+      let bankSlipUrl = existingPayment.bank_slip_url;
+      if ((!invoiceUrl || !bankSlipUrl) && existingPayment.asaas_payment_id) {
+        // Linha criada antes da migration de gross-up, sem os links
+        // persistidos — busca uma única vez no Asaas e faz backfill.
+        const fresh = await asaasService.getPayment(settings.asaas_api_key, existingPayment.asaas_payment_id);
+        invoiceUrl = fresh.invoiceUrl ?? null;
+        bankSlipUrl = fresh.bankSlipUrl ?? null;
+        await supabase
+          .from('payments')
+          .update({ invoice_url: invoiceUrl, bank_slip_url: bankSlipUrl })
+          .eq('id', existingPayment.id);
+      }
+
+      const charge: AsaasPaymentResponse = {
+        id: existingPayment.asaas_payment_id,
+        customer: '',
+        value: existingPayment.value,
+        netValue: existingPayment.net_value,
+        billingType: existingPayment.billing_type,
+        status: existingPayment.status,
+        dueDate: existingPayment.due_date,
+        paymentDate: existingPayment.payment_date,
+        invoiceUrl,
+        bankSlipUrl,
+        externalReference: invoice.id,
+        deleted: false,
+      };
+
+      const feeAmount = Number((existingPayment.value - invoice.total_value).toFixed(2));
+      const divergent = existingPayment.net_value_projected != null
+        && Math.abs(existingPayment.net_value_projected - invoice.total_value) >= CENTS_TOLERANCE;
+
+      return res.status(200).json({
+        invoice_id: invoice.id,
+        charge,
+        payment: existingPayment,
+        breakdown: buildBreakdown(invoice.total_value, feeAmount, existingPayment.value, existingPayment.net_value),
+        ...(divergent ? { warning: 'net_value_projected divergente do total_value atual da fatura' } : {}),
+      });
+    }
+
     const { data: client } = await supabase
       .from('clients')
       .select('asaas_customer_id')
@@ -102,20 +222,14 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
       return res.status(400).json({ error: 'Cliente sem cadastro Asaas (asaas_customer_id)' });
     }
 
-    const { data: settings } = await supabase
-      .from('erp_company_settings')
-      .select('asaas_api_key')
-      .eq('active', true)
-      .single();
-    if (!settings?.asaas_api_key) {
-      return res.status(400).json({ error: 'Locadora sem chave Asaas configurada' });
-    }
+    const billingType = (invoice.payment_method as AsaasBillingType) || 'UNDEFINED';
+    const { feeAmount, chargedValue } = calculateGrossUp(billingType, invoice.total_value, settings);
 
     // Cobrança de valor único — descrição vem da fatura/equipamento.
     const chargeData: AsaasChargeRequest = {
       customer: client.asaas_customer_id,
-      billingType: (invoice.payment_method as AsaasBillingType) || 'UNDEFINED',
-      value: invoice.total_value,
+      billingType,
+      value: chargedValue,
       dueDate: invoice.due_date,
       description: `Fatura ${invoice.invoice_number || invoice.id} - ${invoice.equipment_name}`,
       externalReference: invoice.id,
@@ -137,6 +251,9 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
         billing_type: charge.billingType,
         value: charge.value,
         net_value: charge.netValue,
+        net_value_projected: invoice.total_value,
+        invoice_url: charge.invoiceUrl ?? null,
+        bank_slip_url: charge.bankSlipUrl ?? null,
         due_date: charge.dueDate,
         payment_date: charge.paymentDate ?? null,
         status: charge.status,
@@ -144,9 +261,35 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
       })
       .select()
       .single();
-    if (paymentError) throw paymentError;
 
-    return res.status(201).json({ invoice_id: invoice.id, charge, payment });
+    if (paymentError) {
+      if (paymentError.code === '23505') {
+        // Corrida: outra requisição concorrente já criou a cobrança ativa
+        // desta fatura entre a checagem de idempotência acima e este insert.
+        // A cobrança que acabamos de criar no Asaas (charge.id) fica órfã
+        // localmente — logar para reconciliação manual (aceitável para
+        // sistema single-tenant de baixo volume, sem lock/transação).
+        console.warn(`[createChargeForInvoice] corrida detectada para invoice ${invoice.id}; Asaas payment ${charge.id} não persistido localmente`);
+        const { data: winner } = await fetchActivePayment();
+        return res.status(200).json({
+          invoice_id: invoice.id,
+          charge,
+          payment: winner,
+          breakdown: buildBreakdown(invoice.total_value, feeAmount, chargedValue, winner?.net_value ?? null),
+        });
+      }
+      throw paymentError;
+    }
+
+    const divergent = Math.abs(charge.netValue - invoice.total_value) >= CENTS_TOLERANCE;
+
+    return res.status(201).json({
+      invoice_id: invoice.id,
+      charge,
+      payment,
+      breakdown: buildBreakdown(invoice.total_value, feeAmount, chargedValue, charge.netValue),
+      ...(divergent ? { warning: `net_value do Asaas (${charge.netValue}) diverge do total_value da fatura (${invoice.total_value}) — taxa em erp_company_settings pode estar desatualizada` } : {}),
+    });
   } catch (error: any) {
     console.error('[createChargeForInvoice] Erro:', error.response?.data || error.message);
     return res.status(500).json({ error: error.message, asaas: error.response?.data });
@@ -154,7 +297,9 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
 };
 
 // Status de pagamento de uma fatura específica — pode haver mais de um
-// registro em `payments` por fatura (ex: reemissão de cobrança).
+// registro em `payments` por fatura (histórico de cobranças canceladas), mas
+// no máximo uma ativa por vez (ver índice único parcial na migration
+// 20260731130000 e a checagem de idempotência em createChargeForInvoice).
 export const getInvoicePayments = async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
   try {

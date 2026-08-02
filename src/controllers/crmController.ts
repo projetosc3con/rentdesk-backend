@@ -925,7 +925,7 @@ export const generateContractRecord = async (req: AuthRequest, res: Response) =>
     if (formError || !form) throw new Error('Formulário não encontrado');
     if (form.form_status === 'Rascunho') throw new Error('Preencha os campos obrigatórios');
 
-    const { data: settings } = await supabase.from('erp_company_settings').select('*').eq('active', true).single();
+    const { data: settings } = await supabaseAdmin.from('erp_company_settings').select('*').eq('active', true).single();
 
     const snapshot = {
       contract_date: form.contract_date,

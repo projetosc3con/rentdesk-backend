@@ -187,6 +187,10 @@ export const finishProcessing = async (req: AuthRequest, res: Response) => {
       work_site: form.work_site || null,
       billing_period_start: form.period_start || null,
       billing_period_end: form.period_end || null,
+      // Escopo confirmado: a triagem só emite boleto (POST /payments/invoices/:id/charge
+      // logo em seguida, no frontend) — sem isso, o gross-up trata o billing_type
+      // ausente como 'UNDEFINED' e não aplica nenhum ajuste de taxa.
+      payment_method: 'BOLETO',
       cost_rental: form.cost_rental || 0,
       cost_insurance: form.cost_insurance || 0,
       cost_freight: form.cost_freight || 0,
