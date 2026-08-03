@@ -8,11 +8,21 @@ export interface Payment {
   billing_type: AsaasBillingType;
   value: number;
   net_value: number | null;
+  net_value_projected: number | null;
+  invoice_url: string | null;
+  bank_slip_url: string | null;
   due_date: string;
   payment_date: string | null;
   status: AsaasPaymentStatus;
   is_manual_reconciliation: boolean;
   created_at: string;
+}
+
+export interface PaymentBreakdown {
+  total_value: number;
+  fee_amount: number;
+  charged_value: number;
+  net_value: number | null;
 }
 
 export interface AsaasWebhookLog {

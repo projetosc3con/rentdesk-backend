@@ -19,6 +19,8 @@ import hrRoutes from './routes/hrRoutes';
 import asaasWebhookRoutes from './routes/asaasWebhookRoutes';
 import paymentRoutes from './routes/paymentRoutes';
 import serasaRoutes from './routes/serasaRoutes';
+import fiscalRoutes from './routes/fiscalRoutes';
+import billRoutes from './routes/billRoutes';
 
 dotenv.config();
 
@@ -58,6 +60,9 @@ app.use('/api/logistics', authenticate, logisticsRoutes);
 app.use('/api/hr', authenticate, hrRoutes);
 app.use('/api/payments', authenticate, paymentRoutes);
 app.use('/api/consultar-score', authenticate, serasaRoutes);
+app.use('/api/fiscal', authenticate, fiscalRoutes);
+// TODO(SECURITY): ver aviso em billController.ts — `bills` ainda não tem RLS/policies.
+app.use('/api/bills', authenticate, billRoutes);
 
 app.listen(PORT, () => {
   console.log(`RentDesk Backend running on http://localhost:${PORT}`);

@@ -1,6 +1,6 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
-import { getSupabaseUserClient } from '../config/supabase';
+import { getSupabaseUserClient, supabaseAdmin } from '../config/supabase';
 import { asaasService } from '../services/asaasService';
 import { AsaasCustomerRequest } from '../types/asaas';
 
@@ -84,11 +84,14 @@ export const syncClientAsaas = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Cliente não encontrado' });
     }
 
-    const { data: settings } = await supabase
+    const { data: settings, error: settingsError } = await supabaseAdmin
       .from('erp_company_settings')
       .select('asaas_api_key')
       .eq('active', true)
       .single();
+    if (settingsError) {
+      console.error('[syncClientAsaas] Erro ao ler erp_company_settings:', settingsError);
+    }
     if (!settings?.asaas_api_key) {
       return res.status(400).json({ error: 'Locadora sem chave Asaas configurada' });
     }
@@ -137,11 +140,14 @@ export const verifyClientAsaas = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Cliente ainda não sincronizado (asaas_customer_id vazio)' });
     }
 
-    const { data: settings } = await supabase
+    const { data: settings, error: settingsError } = await supabaseAdmin
       .from('erp_company_settings')
       .select('asaas_api_key')
       .eq('active', true)
       .single();
+    if (settingsError) {
+      console.error('[verifyClientAsaas] Erro ao ler erp_company_settings:', settingsError);
+    }
     if (!settings?.asaas_api_key) {
       return res.status(400).json({ error: 'Locadora sem chave Asaas configurada' });
     }

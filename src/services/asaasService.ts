@@ -4,6 +4,7 @@ import {
   AsaasCustomerRequest, AsaasCustomerResponse,
   AsaasChargeRequest, AsaasPaymentResponse,
   AsaasReceiveInCashRequest, AsaasReceiveInCashResponse,
+  AsaasInvoiceRequest, AsaasInvoiceResponse,
 } from '../types/asaas';
 
 const ASAAS_BASE_URL = process.env.ASAAS_BASE_URL || 'https://api-sandbox.asaas.com';
@@ -60,6 +61,13 @@ class AsaasService {
     return response;
   }
 
+  async getPayment(apiKey: string, paymentId: string): Promise<AsaasPaymentResponse> {
+    const { data: response } = await this.http.get<AsaasPaymentResponse>(
+      `/v3/payments/${paymentId}`, this.authHeaders(apiKey)
+    );
+    return response;
+  }
+
   async receiveInCash(
     apiKey: string, paymentId: string, data: AsaasReceiveInCashRequest
   ): Promise<AsaasReceiveInCashResponse> {
@@ -68,6 +76,20 @@ class AsaasService {
     // (receivedInCashFeeValue) — não tratado aqui.
     const { data: response } = await this.http.post<AsaasReceiveInCashResponse>(
       `/v3/payments/${paymentId}/receiveInCash`, data, this.authHeaders(apiKey)
+    );
+    return response;
+  }
+
+  async createInvoice(apiKey: string, data: AsaasInvoiceRequest): Promise<AsaasInvoiceResponse> {
+    const { data: response } = await this.http.post<AsaasInvoiceResponse>(
+      '/v3/invoices', data, this.authHeaders(apiKey)
+    );
+    return response;
+  }
+
+  async getInvoice(apiKey: string, invoiceId: string): Promise<AsaasInvoiceResponse> {
+    const { data: response } = await this.http.get<AsaasInvoiceResponse>(
+      `/v3/invoices/${invoiceId}`, this.authHeaders(apiKey)
     );
     return response;
   }

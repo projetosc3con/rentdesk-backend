@@ -490,6 +490,14 @@ export const convertLead = async (req: AuthRequest, res: Response) => {
       .update({ client_id: newClient.id })
       .eq('lead_id', id);
 
+    // 4b. Relinkar negociações que apontavam pro lead convertido — sem isso
+    // o deal continua "vinculado a Lead" mesmo depois da conversão, e a
+    // triagem/faturamento falha mais adiante por falta de client_id.
+    await supabase
+      .from('crm_deals')
+      .update({ client_id: newClient.id, lead_id: null })
+      .eq('lead_id', id);
+
     // 5. Atualizar status do lead
     const { data: updatedLead, error: updateLeadError } = await supabase
       .from('crm_leads')
@@ -925,7 +933,7 @@ export const generateContractRecord = async (req: AuthRequest, res: Response) =>
     if (formError || !form) throw new Error('Formulário não encontrado');
     if (form.form_status === 'Rascunho') throw new Error('Preencha os campos obrigatórios');
 
-    const { data: settings } = await supabase.from('erp_company_settings').select('*').eq('active', true).single();
+    const { data: settings } = await supabaseAdmin.from('erp_company_settings').select('*').eq('active', true).single();
 
     const snapshot = {
       contract_date: form.contract_date,
