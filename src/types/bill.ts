@@ -35,3 +35,29 @@ export interface CreateBillPayload {
   already_settled?: boolean;
   settled_date?: string;
 }
+
+// Item normalizado do extrato bancário (GET /api/bills): mescla `bills`
+// (já conciliado, automático ou manual) com `payments` ainda sem bill
+// vinculado (cobrança Asaas em aberto). `raw` mantém a linha original
+// completa para qualquer campo que o front precise além do shape comum
+// (ex: invoice_url, bank_slip_url, pix_end_to_end_id).
+export interface BillStatementItem {
+  source: 'bill' | 'payment';
+  id: string;
+  type: BillType;
+  status: string;
+  origin: BillOrigin | null;
+  gross_value: number;
+  net_value: number | null;
+  fee_amount: number | null;
+  due_date: string | null;
+  settled_date: string | null;
+  client_id: string | null;
+  client_name: string | null;
+  counterparty_name: string | null;
+  invoice_number: string | null;
+  description: string | null;
+  invoice_url: string | null;
+  bank_slip_url: string | null;
+  raw: Record<string, unknown>;
+}
