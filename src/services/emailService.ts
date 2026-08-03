@@ -21,7 +21,7 @@ function formatDate(isoDate: string): string {
   return `${day}/${month}/${year}`;
 }
 
-function buildBoletoEmailTemplate(params: BoletoEmailParams): string {
+function buildBoletoEmailTemplate(params: BoletoEmailParams, replyTo: string): string {
   const paymentLink = params.invoiceUrl || params.bankSlipUrl || '#';
   return `
 <!DOCTYPE html>
@@ -64,6 +64,9 @@ function buildBoletoEmailTemplate(params: BoletoEmailParams): string {
                 <p style="margin:24px 0 0;color:#9ca3af;font-size:12px;line-height:1.5;">
                   Se você já efetuou o pagamento, desconsidere este e-mail.
                 </p>
+                <p style="margin:8px 0 0;color:#9ca3af;font-size:12px;line-height:1.5;">
+                  Este é um e-mail automático, não responda a esta mensagem. Em caso de dúvidas, entre em contato pelo e-mail ${replyTo}.
+                </p>
               </td>
             </tr>
           </table>
@@ -95,13 +98,20 @@ class EmailService {
     // pra esse endereço em vez do e-mail real do cliente.
     const to = process.env.EMAIL_TEST_OVERRIDE || params.to;
 
+    // altomaster.com.br (domínio verificado no Resend, usado em fromEmail) só
+    // envia — não tem caixa de entrada configurada, então qualquer resposta
+    // do cliente se perderia. reply_to redireciona a resposta pra uma caixa
+    // que existe de fato.
+    const replyTo = process.env.RESEND_REPLY_TO_EMAIL || 'locacao@altomaster.net';
+
     await this.http.post(
       '/emails',
       {
         from: fromEmail,
         to: [to],
+        reply_to: replyTo,
         subject: `Boleto de locação - ${params.companyName}`,
-        html: buildBoletoEmailTemplate(params),
+        html: buildBoletoEmailTemplate(params, replyTo),
       },
       { headers: { Authorization: `Bearer ${apiKey}` } }
     );
