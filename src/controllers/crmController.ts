@@ -2,6 +2,7 @@ import { Response } from 'express';
 import axios from 'axios';
 import { AuthRequest } from '../middleware/auth';
 import { getSupabaseUserClient, supabaseAdmin } from '../config/supabase';
+import { emailService } from '../services/emailService';
 // Pipelines
 export const getPipelines = async (req: AuthRequest, res: Response) => {
   try {
@@ -1088,6 +1089,38 @@ export const uploadSignedContract = async (req: AuthRequest, res: Response) => {
       }]);
     }
 
+    // Send email notification to logistics team
+    try {
+      const { data: fullDeal } = await supabase.from('crm_deals').select('title').eq('id', dealId).single();
+      const snapshot = data.snapshot || {};
+      
+      const { data: logisticUsers } = await supabaseAdmin
+        .from('users_profiles')
+        .select('email')
+        .eq('access_level', 'Logística')
+        .eq('active', true)
+        .not('email', 'is', null);
+      
+      const emails = new Set<string>();
+      emails.add('locacao@altomaster.net');
+      if (logisticUsers) {
+        logisticUsers.forEach(u => {
+          if (u.email) emails.add(u.email);
+        });
+      }
+
+      await emailService.sendSignedContractNotification({
+        to: Array.from(emails),
+        clientName: snapshot.locatario?.company_name || 'Cliente',
+        contractNumber: data.contract_number,
+        equipmentDescription: snapshot.equipment?.description || 'Equipamento',
+        dealTitle: fullDeal?.title || 'Negociação',
+        signedFileUrl: urlData?.signedUrl || '#'
+      });
+    } catch (emailErr) {
+      console.error('[crmController] Erro ao enviar notificação interna de contrato assinado:', emailErr);
+    }
+
     res.json(data);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -1135,6 +1168,143 @@ export const deleteContractRecord = async (req: AuthRequest, res: Response) => {
     res.json({ message: 'Contrato excluído com sucesso' });
   } catch (error: any) {
     console.error('[crmController] Erro em deleteContractRecord:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const sendContractEmail = async (req: AuthRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseUserClient(req.token!);
+    const dealId = req.params.id;
+    const contractId = req.params.contractId;
+    const { pdf_base64 } = req.body; // Base64-encoded PDF from frontend
+
+    // 1. Get contract record
+    const { data: contract, error: contractError } = await supabase
+      .from('crm_deal_contracts')
+      .select('*')
+      .eq('id', contractId)
+      .single();
+    if (contractError || !contract) throw new Error('Contrato não encontrado');
+
+    // 2. Get deal info
+    const { data: deal, error: dealError } = await supabase
+      .from('crm_deals')
+      .select('*, primary_contact_id, client_id, lead_id')
+      .eq('id', dealId)
+      .single();
+    if (dealError || !deal) throw new Error('Negociação não encontrada');
+
+    // 3. Find the primary contact email
+    let contactEmail = '';
+    let contactName = '';
+
+    if (deal.primary_contact_id) {
+      const { data: contact } = await supabase
+        .from('crm_contacts')
+        .select('full_name, email')
+        .eq('id', deal.primary_contact_id)
+        .single();
+      if (contact) {
+        contactEmail = contact.email || '';
+        contactName = contact.full_name || '';
+      }
+    }
+
+    // Fallback: try other contacts linked to the client or lead
+    if (!contactEmail) {
+      const filter: any = {};
+      if (deal.client_id) filter.client_id = deal.client_id;
+      else if (deal.lead_id) filter.lead_id = deal.lead_id;
+
+      if (Object.keys(filter).length > 0) {
+        const key = Object.keys(filter)[0];
+        const { data: contacts } = await supabase
+          .from('crm_contacts')
+          .select('full_name, email')
+          .eq(key, filter[key])
+          .eq('active', true)
+          .order('is_primary', { ascending: false })
+          .limit(1);
+        if (contacts && contacts.length > 0 && contacts[0].email) {
+          contactEmail = contacts[0].email;
+          contactName = contacts[0].full_name || '';
+        }
+      }
+    }
+
+    // Last fallback: client email
+    if (!contactEmail && deal.client_id) {
+      const { data: client } = await supabase
+        .from('clients')
+        .select('company_name, email')
+        .eq('id', deal.client_id)
+        .single();
+      if (client?.email) {
+        contactEmail = client.email;
+        contactName = contactName || client.company_name || '';
+      }
+    }
+
+    if (!contactEmail) {
+      return res.status(400).json({ error: 'Nenhum e-mail de contato encontrado para este negócio' });
+    }
+
+    // 4. Upload PDF to Supabase storage if base64 was provided
+    const snapshot = contract.snapshot || {};
+    const pdfFilename = `PROPOSTA DE LOCAÇÃO - ${snapshot.locatario?.company_name || 'Contrato'}.pdf`;
+    let downloadUrl = '';
+
+    if (pdf_base64) {
+      const pdfBuffer = Buffer.from(pdf_base64, 'base64');
+      const storagePath = `${dealId}/${contractId}/proposta.pdf`;
+
+      const { error: uploadError } = await supabaseAdmin.storage
+        .from('crm-contracts')
+        .upload(storagePath, pdfBuffer, {
+          contentType: 'application/pdf',
+          upsert: true,
+        });
+      if (uploadError) {
+        console.error('[crmController] Erro ao fazer upload do PDF:', uploadError);
+      }
+
+      // Generate signed URL (10 years)
+      const { data: urlData } = await supabaseAdmin.storage
+        .from('crm-contracts')
+        .createSignedUrl(storagePath, 60 * 60 * 24 * 365 * 10);
+      downloadUrl = urlData?.signedUrl || '';
+
+      // Update contract record with the PDF URL
+      await supabase.from('crm_deal_contracts').update({
+        pdf_url: downloadUrl,
+      }).eq('id', contractId);
+    }
+
+    // 5. Get company settings for the from name
+    const { data: settings } = await supabaseAdmin
+      .from('erp_company_settings')
+      .select('company_name')
+      .eq('active', true)
+      .single();
+    const companyName = settings?.company_name || 'RentDesk';
+
+    // 6. Send email
+    await emailService.sendContractEmail({
+      to: contactEmail,
+      contactName: contactName || snapshot.locatario?.company_name || 'Cliente',
+      companyName,
+      contractNumber: contract.contract_number,
+      equipmentDescription: snapshot.equipment?.description || 'Equipamento',
+      totalValue: Number(snapshot.costs?.total) || 0,
+      downloadUrl: downloadUrl || '#',
+      pdfBase64: pdf_base64 || undefined,
+      pdfFilename,
+    });
+
+    res.json({ message: 'E-mail enviado com sucesso', sentTo: contactEmail });
+  } catch (error: any) {
+    console.error('[crmController] Erro em sendContractEmail:', error);
     res.status(500).json({ error: error.message });
   }
 };

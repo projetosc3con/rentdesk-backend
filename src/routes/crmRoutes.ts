@@ -30,7 +30,8 @@ import {
   generateContractRecord,
   getContracts,
   uploadSignedContract,
-  deleteContractRecord
+  deleteContractRecord,
+  sendContractEmail
 } from '../controllers/crmController';
 
 const router = Router();
@@ -73,6 +74,7 @@ router.put('/deals/:id/contract-form', saveContractForm);
 router.post('/deals/:id/contract/generate', generateContractRecord);
 router.get('/deals/:id/contracts', getContracts);
 router.post('/deals/:id/contract/upload', uploadSignedContract);
+router.post('/deals/:id/contract/:contractId/send-email', sendContractEmail);
 router.delete('/deals/:id/contract/:contractId', deleteContractRecord);
 
 // Tasks
