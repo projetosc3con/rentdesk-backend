@@ -2,52 +2,7 @@ import { Response } from 'express';
 import { getSupabaseUserClient } from '../config/supabase';
 import { AuthRequest } from '../middleware/auth';
 import { BillStatementItem, CreateBillPayload } from '../types/bill';
-
-function normalizeBill(row: any): BillStatementItem {
-  return {
-    source: 'bill',
-    id: row.id,
-    type: row.type,
-    status: row.status,
-    origin: row.origin,
-    gross_value: row.gross_value,
-    net_value: row.net_value,
-    fee_amount: row.fee_amount,
-    due_date: row.due_date,
-    settled_date: row.reconciled_at,
-    client_id: row.client_id,
-    client_name: row.client?.company_name ?? null,
-    counterparty_name: row.counterparty_name,
-    invoice_number: row.invoice?.invoice_number ?? null,
-    description: row.description,
-    invoice_url: row.payment?.invoice_url ?? null,
-    bank_slip_url: row.payment?.bank_slip_url ?? null,
-    raw: row,
-  };
-}
-
-function normalizePendingPayment(row: any): BillStatementItem {
-  return {
-    source: 'payment',
-    id: row.id,
-    type: 'receivable',
-    status: row.status,
-    origin: null,
-    gross_value: row.value,
-    net_value: row.net_value,
-    fee_amount: row.net_value != null ? row.value - row.net_value : null,
-    due_date: row.due_date,
-    settled_date: row.payment_date,
-    client_id: row.client_id,
-    client_name: row.invoice?.client_name ?? null,
-    counterparty_name: null,
-    invoice_number: row.invoice?.invoice_number ?? null,
-    description: null,
-    invoice_url: row.invoice_url ?? null,
-    bank_slip_url: row.bank_slip_url ?? null,
-    raw: row,
-  };
-}
+import { normalizeBill, normalizePendingPayment } from '../utils/billNormalizers';
 
 // TODO(SECURITY): a tabela `bills` foi criada sem RLS/policies (confirmado
 // via introspecção do schema em 02/08/2026). Esta rota já usa o client
@@ -72,7 +27,7 @@ function normalizePendingPayment(row: any): BillStatementItem {
 export const listBills = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
-    const { client_id, status, origin, from, to } = req.query;
+    const { client_id, status, origin, from, to, type, unreconciled } = req.query;
 
     let billsQuery = supabase
       .from('bills')
@@ -82,18 +37,21 @@ export const listBills = async (req: AuthRequest, res: Response) => {
     if (client_id) billsQuery = billsQuery.eq('client_id', client_id as string);
     if (status) billsQuery = billsQuery.eq('status', status as string);
     if (origin) billsQuery = billsQuery.eq('origin', origin as string);
+    if (type) billsQuery = billsQuery.eq('type', type as string);
     if (from) billsQuery = billsQuery.gte('due_date', from as string);
     if (to) billsQuery = billsQuery.lte('due_date', to as string);
+    if (unreconciled === 'true') billsQuery = billsQuery.is('bank_transaction_date', null);
 
     const { data: bills, error: billsError } = await billsQuery;
     if (billsError) throw billsError;
 
     const items: BillStatementItem[] = (bills ?? []).map(normalizeBill);
 
-    // `origin`/`status` são específicos do vocabulário de `bills` e não têm
-    // equivalente em `payments` — quando presentes, o usuário quer só a
-    // visão de `bills`, então pulamos o bloco de payments pendentes.
-    if (!origin && !status) {
+    // `origin`/`status`/`type`/`unreconciled` são específicos do vocabulário
+    // de `bills` e não têm equivalente em `payments` (ou não fazem sentido
+    // pra um picker de lançamentos existentes) — quando presentes, o usuário
+    // quer só a visão de `bills`, então pulamos o bloco de payments pendentes.
+    if (!origin && !status && !type && !unreconciled) {
       const { data: reconciled, error: reconciledError } = await supabase
         .from('bills')
         .select('payment_id')
@@ -141,8 +99,9 @@ export const createBill = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
     const {
-      type, client_id, counterparty_name, description,
+      type, counterparty_name, description,
       gross_value, due_date, already_settled, settled_date,
+      bank_transaction_date, bank_raw_snapshot,
     } = req.body as CreateBillPayload;
 
     if (type !== 'receivable' && type !== 'payable') {
@@ -154,23 +113,20 @@ export const createBill = async (req: AuthRequest, res: Response) => {
     if (!due_date) {
       return res.status(400).json({ error: 'due_date é obrigatório' });
     }
-    if (type === 'receivable' && !client_id) {
-      return res.status(400).json({ error: 'client_id é obrigatório para conta a receber' });
-    }
-    if (type === 'payable' && !counterparty_name) {
-      return res.status(400).json({ error: 'counterparty_name é obrigatório para conta a pagar' });
-    }
     if (already_settled && !settled_date) {
       return res.status(400).json({ error: 'settled_date é obrigatório quando already_settled=true' });
     }
 
+    // Lançamento manual não vincula a um cliente cadastrado — apenas um
+    // nome livre (counterparty_name), tanto pra conta a pagar (fornecedor)
+    // quanto a receber (quem vai pagar).
     const { data, error } = await supabase
       .from('bills')
       .insert({
         origin: 'MANUAL',
         type,
-        client_id: type === 'receivable' ? client_id : null,
-        counterparty_name: type === 'payable' ? counterparty_name : null,
+        client_id: null,
+        counterparty_name: counterparty_name || null,
         description: description || null,
         gross_value,
         fee_amount: 0,
@@ -178,6 +134,8 @@ export const createBill = async (req: AuthRequest, res: Response) => {
         due_date,
         status: already_settled ? 'Recebido' : 'Pendente',
         reconciled_at: already_settled ? new Date(settled_date as string).toISOString() : null,
+        bank_transaction_date: bank_transaction_date || null,
+        bank_raw_snapshot: bank_raw_snapshot || null,
       })
       .select('*, invoice:rental_invoices(invoice_number, client_name), client:clients(company_name, cnpj)')
       .single();

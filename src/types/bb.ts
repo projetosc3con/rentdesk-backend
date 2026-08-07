@@ -1,7 +1,8 @@
-// Tipos best-effort para a API do Banco do Brasil (Developers BB, ambiente
-// homologação). Nenhum destes shapes foi validado contra a doc oficial —
-// confirmar campo a campo antes de setar ENABLE_BB_PIX_TRANSFER=true.
-// Mesma ressalva já usada em src/types/asaas.ts para os shapes best-effort.
+// Tipos para as APIs do Banco do Brasil (Developers BB). Os shapes de Pix
+// abaixo ainda são best-effort — nenhum validado contra a doc oficial,
+// confirmar campo a campo antes de setar ENABLE_BB_PIX_TRANSFER=true (mesma
+// ressalva usada em src/types/asaas.ts). Os shapes de Extrato mais abaixo já
+// refletem a especificação OpenAPI oficial da API de Extratos v2.
 
 // --- OAuth2 (client_credentials) ---
 export interface BbOAuthTokenResponse {
@@ -41,4 +42,58 @@ export interface BbPixTransferResult {
   endToEndId: string | null;
   transferDate: string | null;
   raw: Record<string, unknown> | null;
+}
+
+// --- Extrato de Conta Corrente v2 — baseado na especificação OpenAPI oficial
+// (Developers BB, "Extratos" v2.0.1, servers extratos.mtls.api.{hm.}bb.com.br/v2).
+// Diferente do Pix acima, este shape reflete a doc real, não é mais chute.
+//
+// `indicadorTipoLancamento` é o ESTÁGIO do lançamento, não débito/crédito:
+// '1' contabilizado, '2' futuro, '3' em processamento; além de códigos de
+// saldo/limite que vêm misturados na mesma lista e devem ser descartados
+// antes de conciliar: 'SA' saldo atual, 'RA' saldo invest. resgate automático,
+// 'LE' lim. extra cartão utilizado, 'SD' saldo disponível, 'LD' limite
+// disponível, 'LC' limite contratado, 'LU' limite utilizado.
+// O campo de Débito/Crédito de fato é `indicadorSinalLancamento`.
+export interface BbExtratoLancamentoRaw {
+  indicadorTipoLancamento: string;
+  dataLancamento: number; // DDMMAAAA
+  dataMovimento?: number; // DDMMAAAA, só em lançamentos retroativos
+  codigoAgenciaOrigem?: number;
+  numeroLote?: number;
+  numeroDocumento?: number; // int64
+  codigoHistorico?: number;
+  textoDescricaoSubHistorico?: string; // descrição textual do lançamento (max 25)
+  codigoSubHistorico?: number;
+  valorLancamento: number; // sempre magnitude positiva
+  indicadorSinalLancamento: 'C' | 'D' | '*'; // crédito / débito / valor bloqueado
+  textoInformacaoComplementar?: string; // max 38
+  numeroCadastroPessoaFisicaCadastroNacPessoasJuridicasContrapartida?: string; // CPF/CNPJ contraparte
+  indicadorTipoPessoaContrapartida?: 'F' | 'J';
+  codigoBancoContrapartida?: number;
+  codigoAgenciaContrapartida?: number;
+  numeroContaContrapartida?: string;
+  textoDigitoVerificadorContaContrapartida?: string;
+  numeroISPB?: number;
+  textoIdentificadorUnicoTransacao?: string; // max 64 — útil pra cruzar com pix_end_to_end_id
+  codigoConfederacaoNacionalBancos?: number;
+  textoCampoIndeterminado?: string;
+  [key: string]: unknown;
+}
+
+export interface BbExtratoResponseRaw {
+  numeroPaginaAtual: number;
+  quantidadeRegistroPaginaAtual: number;
+  numeroPaginaAnterior: number;
+  numeroPaginaProximo: number; // 0 = última página
+  quantidadeTotalPagina: number;
+  quantidadeTotalRegistro: number;
+  listaLancamento: BbExtratoLancamentoRaw[];
+}
+
+// Corpo de erro 422 ("Erro Negocial") / 500 ("Erro Sistema") da API de Extratos.
+export interface BbApiErrorResponse {
+  code: string;
+  message: string;
+  variaveisMonitoradas?: Record<string, unknown>[];
 }

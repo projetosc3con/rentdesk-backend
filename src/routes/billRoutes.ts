@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { listBills, createBill } from '../controllers/billController';
+import { reconcileBankStatement, linkStatementLineToBill } from '../controllers/bankReconciliationController';
 import { authorize } from '../middleware/auth';
 
 const router = Router();
@@ -12,5 +13,7 @@ const fullAccess = authorize(['Admin', 'Administrador', 'Diretoria', 'Gerente'])
 // RLS ainda não estar configurada em `bills`).
 router.get('/', fullAccess, listBills);
 router.post('/', fullAccess, createBill);
+router.post('/reconcile', fullAccess, reconcileBankStatement);
+router.post('/:id/link-statement-line', fullAccess, linkStatementLineToBill);
 
 export default router;
