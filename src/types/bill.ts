@@ -18,6 +18,7 @@ export interface Bill {
   pix_end_to_end_id: string | null;
   bank_transaction_date: string | null;
   bank_raw_snapshot: Record<string, unknown> | null;
+  barcode: string | null;
   status: BillStatus;
   reconciled_at: string | null;
   created_by: string | null;
@@ -29,6 +30,7 @@ export interface CreateBillPayload {
   type: BillType;
   counterparty_name?: string;
   description?: string;
+  barcode?: string;
   gross_value: number;
   due_date: string;
   already_settled?: boolean;

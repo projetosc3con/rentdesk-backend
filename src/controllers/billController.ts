@@ -99,7 +99,7 @@ export const createBill = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
     const {
-      type, counterparty_name, description,
+      type, counterparty_name, description, barcode,
       gross_value, due_date, already_settled, settled_date,
       bank_transaction_date, bank_raw_snapshot,
     } = req.body as CreateBillPayload;
@@ -136,6 +136,11 @@ export const createBill = async (req: AuthRequest, res: Response) => {
         reconciled_at: already_settled ? new Date(settled_date as string).toISOString() : null,
         bank_transaction_date: bank_transaction_date || null,
         bank_raw_snapshot: bank_raw_snapshot || null,
+        // Coluna `barcode` só existe depois da migração
+        // `ALTER TABLE bills ADD COLUMN barcode text;` — incluída apenas
+        // quando informada pra não quebrar lançamentos sem código de barras
+        // caso a migração ainda não tenha rodado.
+        ...(barcode ? { barcode } : {}),
       })
       .select('*, invoice:rental_invoices(invoice_number, client_name), client:clients(company_name, cnpj)')
       .single();

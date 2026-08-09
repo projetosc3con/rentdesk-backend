@@ -1,8 +1,9 @@
 import { Response } from 'express';
+import { SupabaseClient } from '@supabase/supabase-js';
 import { AuthRequest } from '../middleware/auth';
 import { getSupabaseUserClient, supabaseAdmin } from '../config/supabase';
 import { asaasService } from '../services/asaasService';
-import { AsaasInvoiceRequest } from '../types/asaas';
+import { AsaasInvoiceRequest, AsaasInvoiceResponse } from '../types/asaas';
 
 const TERMINAL_STATUSES = ['AUTHORIZED', 'CANCELLED', 'CANCELLATION_DENIED', 'ERROR'];
 
@@ -11,81 +12,90 @@ const TERMINAL_STATUSES = ['AUTHORIZED', 'CANCELLED', 'CANCELLATION_DENIED', 'ER
 // bens móveis. Por padrão emitimos a NFS-e isenta (iss=0, retainIss=false);
 // municípios que exigirem tributação normal podem sobrescrever via
 // erp_company_settings.nfse_iss_regime = 'Tributado'.
+//
+// Núcleo compartilhado entre a rota HTTP (emitNfse, abaixo) e a emissão
+// automática disparada pelo webhook de pagamento confirmado
+// (asaasWebhookController.ts) — por isso recebe o client Supabase como
+// parâmetro (rota usa o client com RLS do usuário, webhook usa supabaseAdmin).
+export async function emitNfseCore(supabase: SupabaseClient, invoiceId: string): Promise<{ nfse: any; asaas: AsaasInvoiceResponse }> {
+  const { data: invoice, error: invoiceError } = await supabase
+    .from('rental_invoices')
+    .select('*')
+    .eq('id', invoiceId)
+    .single();
+  if (invoiceError || !invoice) {
+    throw new Error('Fatura não encontrada');
+  }
+
+  const { data: settings, error: settingsError } = await supabaseAdmin
+    .from('erp_company_settings')
+    .select('asaas_api_key, nfse_service_code, nfse_iss_regime')
+    .eq('active', true)
+    .single();
+  if (settingsError) {
+    console.error('[emitNfseCore] Erro ao ler erp_company_settings:', settingsError);
+  }
+  if (!settings?.asaas_api_key) {
+    throw new Error('Locadora sem chave Asaas configurada');
+  }
+
+  // Nota fiscal é emitida em cima de uma cobrança já criada (fluxo:
+  // fatura -> cobrança (payments) -> nota fiscal).
+  const { data: payment } = await supabase
+    .from('payments')
+    .select('asaas_payment_id')
+    .eq('invoice_id', invoiceId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+  if (!payment?.asaas_payment_id) {
+    throw new Error('Fatura sem cobrança Asaas gerada. Crie a cobrança antes de emitir a nota fiscal.');
+  }
+
+  const issRegime = settings.nfse_iss_regime || 'Isento';
+  const invoiceData: AsaasInvoiceRequest = {
+    payment: payment.asaas_payment_id,
+    serviceDescription: `Locação de equipamento ${invoice.equipment_name || ''} - ${invoice.work_site || ''}`.trim(),
+    observations: issRegime === 'Isento'
+      ? 'Locação de bem móvel, sem prestação de serviços. Operação imune/isenta de ISS conforme Súmula Vinculante 31 do STF.'
+      : undefined,
+    value: invoice.total_value,
+    effectiveDate: new Date().toISOString().slice(0, 10),
+    municipalServiceCode: settings.nfse_service_code || undefined,
+    taxes: {
+      retainIss: false,
+      iss: issRegime === 'Isento' ? 0 : undefined,
+    },
+  };
+
+  const asaasInvoice = await asaasService.createInvoice(settings.asaas_api_key, invoiceData);
+
+  const { data: nfse, error: nfseError } = await supabase
+    .from('invoice_nfse')
+    .insert({
+      invoice_id: invoiceId,
+      gateway: 'asaas',
+      external_id: asaasInvoice.id,
+      status: asaasInvoice.status,
+      nfse_link: asaasInvoice.pdfUrl,
+      xml_url: asaasInvoice.xmlUrl,
+      service_code: settings.nfse_service_code,
+      iss_regime: issRegime,
+      return_message: asaasInvoice.errors?.map((e) => e.description).join('; ') || null,
+    })
+    .select()
+    .single();
+  if (nfseError) throw nfseError;
+
+  return { nfse, asaas: asaasInvoice };
+}
+
 export const emitNfse = async (req: AuthRequest, res: Response) => {
-  const { id } = req.params;
+  const id = req.params.id as string;
   try {
     const supabase = getSupabaseUserClient(req.token!);
-
-    const { data: invoice, error: invoiceError } = await supabase
-      .from('rental_invoices')
-      .select('*')
-      .eq('id', id)
-      .single();
-    if (invoiceError || !invoice) {
-      return res.status(404).json({ error: 'Fatura não encontrada' });
-    }
-
-    const { data: settings, error: settingsError } = await supabaseAdmin
-      .from('erp_company_settings')
-      .select('asaas_api_key, nfse_service_code, nfse_iss_regime')
-      .eq('active', true)
-      .single();
-    if (settingsError) {
-      console.error('[emitNfse] Erro ao ler erp_company_settings:', settingsError);
-    }
-    if (!settings?.asaas_api_key) {
-      return res.status(400).json({ error: 'Locadora sem chave Asaas configurada' });
-    }
-
-    // Nota fiscal é emitida em cima de uma cobrança já criada (fluxo:
-    // fatura -> cobrança (payments) -> nota fiscal).
-    const { data: payment } = await supabase
-      .from('payments')
-      .select('asaas_payment_id')
-      .eq('invoice_id', id)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
-    if (!payment?.asaas_payment_id) {
-      return res.status(400).json({ error: 'Fatura sem cobrança Asaas gerada. Crie a cobrança antes de emitir a nota fiscal.' });
-    }
-
-    const issRegime = settings.nfse_iss_regime || 'Isento';
-    const invoiceData: AsaasInvoiceRequest = {
-      payment: payment.asaas_payment_id,
-      serviceDescription: `Locação de equipamento ${invoice.equipment_name || ''} - ${invoice.work_site || ''}`.trim(),
-      observations: issRegime === 'Isento'
-        ? 'Locação de bem móvel, sem prestação de serviços. Operação imune/isenta de ISS conforme Súmula Vinculante 31 do STF.'
-        : undefined,
-      value: invoice.total_value,
-      effectiveDate: new Date().toISOString().slice(0, 10),
-      municipalServiceCode: settings.nfse_service_code || undefined,
-      taxes: {
-        retainIss: false,
-        iss: issRegime === 'Isento' ? 0 : undefined,
-      },
-    };
-
-    const asaasInvoice = await asaasService.createInvoice(settings.asaas_api_key, invoiceData);
-
-    const { data: nfse, error: nfseError } = await supabase
-      .from('invoice_nfse')
-      .insert({
-        invoice_id: id,
-        gateway: 'asaas',
-        external_id: asaasInvoice.id,
-        status: asaasInvoice.status,
-        nfse_link: asaasInvoice.pdfUrl,
-        xml_url: asaasInvoice.xmlUrl,
-        service_code: settings.nfse_service_code,
-        iss_regime: issRegime,
-        return_message: asaasInvoice.errors?.map((e) => e.description).join('; ') || null,
-      })
-      .select()
-      .single();
-    if (nfseError) throw nfseError;
-
-    return res.status(201).json({ invoice_id: id, nfse, asaas: asaasInvoice });
+    const { nfse, asaas } = await emitNfseCore(supabase, id);
+    return res.status(201).json({ invoice_id: id, nfse, asaas });
   } catch (error: any) {
     console.error('[emitNfse] Erro:', error.response?.data || error.message);
 

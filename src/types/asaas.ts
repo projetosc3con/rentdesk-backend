@@ -7,30 +7,6 @@ export type AsaasPaymentStatus =
   | 'AWAITING_CHARGEBACK_REVERSAL' | 'DUNNING_REQUESTED' | 'DUNNING_RECEIVED'
   | 'AWAITING_RISK_ANALYSIS' | 'CANCELLED';
 
-// --- Subconta (POST /v3/accounts) ---
-// Best-effort: não veio nos docs colados pelo usuário. Validar contra a doc
-// oficial do Asaas antes de ir pra produção.
-export interface AsaasSubaccountRequest {
-  name: string;
-  email: string;
-  cpfCnpj: string;
-  companyType?: 'MEI' | 'LIMITED' | 'INDIVIDUAL' | 'ASSOCIATION';
-  mobilePhone: string;
-  address: string;
-  addressNumber: string;
-  province: string; // bairro
-  postalCode: string;
-  incomeValue: number;
-}
-
-export interface AsaasSubaccountResponse {
-  id: string;
-  apiKey: string; // -> persistir em erp_company_settings.asaas_api_key
-  walletId: string;
-  email: string;
-  loginEmail: string;
-}
-
 // --- Customer (POST /v3/customers) --- (best-effort, mesma ressalva)
 export interface AsaasCustomerRequest {
   name: string;
@@ -38,6 +14,11 @@ export interface AsaasCustomerRequest {
   email?: string;
   phone?: string;
   mobilePhone?: string;
+  postalCode?: string;
+  address?: string;
+  addressNumber?: string;
+  complement?: string;
+  province?: string; // bairro
   externalReference?: string; // sugestão: clients.id
   notificationDisabled?: boolean;
 }
@@ -87,14 +68,16 @@ export interface AsaasReceiveInCashRequest {
 
 export type AsaasReceiveInCashResponse = AsaasPaymentResponse;
 
-// --- Payload de webhook (foco em PAYMENT_RECEIVED) ---
+// --- Payload de webhook (pagamentos e notas fiscais) ---
 // Best-effort: doc colada não trouxe o envelope de webhook. Validar o nome do
 // campo id (chave de dedup para asaas_webhook_logs.event_id) contra a doc real
-// antes de confiar nele.
+// antes de confiar nele. payment/invoice são mutuamente exclusivos: eventos
+// PAYMENT_* trazem `payment`, eventos INVOICE_* trazem `invoice`.
 export interface AsaasWebhookPayload {
   id: string; // assumido como id único do evento -> event_id
-  event: string; // ex: 'PAYMENT_RECEIVED', 'PAYMENT_OVERDUE'
-  payment: AsaasPaymentResponse;
+  event: string; // ex: 'PAYMENT_RECEIVED', 'INVOICE_AUTHORIZED'
+  payment?: AsaasPaymentResponse;
+  invoice?: AsaasInvoiceResponse;
 }
 
 // --- Nota fiscal de serviço (POST /v3/invoices) --- (best-effort, validar contra doc oficial do Asaas)

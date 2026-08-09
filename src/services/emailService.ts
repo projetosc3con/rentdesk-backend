@@ -168,7 +168,7 @@ function buildSignedContractNotificationTemplate(params: SignedContractNotificat
           <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;overflow:hidden;">
             <tr>
               <td style="background-color:#1f2937;padding:24px 32px;">
-                <span style="color:#ffffff;font-size:18px;font-weight:bold;">Notificação Interna - RentDesk</span>
+                <span style="color:#ffffff;font-size:18px;font-weight:bold;">Notificação Interna - C3Loc</span>
               </td>
             </tr>
             <tr>
@@ -209,6 +209,57 @@ function buildSignedContractNotificationTemplate(params: SignedContractNotificat
 `.trim();
 }
 
+interface NfseEmailParams {
+  to: string;
+  clientName: string;
+  companyName: string;
+  equipmentDescription: string;
+  nfseLink: string;
+}
+
+function buildNfseEmailTemplate(params: NfseEmailParams, replyTo: string): string {
+  return `
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <body style="margin:0;padding:0;background-color:#f4f4f5;font-family:Arial,Helvetica,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f5;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;overflow:hidden;">
+            <tr>
+              <td style="background-color:#1f2937;padding:24px 32px;">
+                <span style="color:#ffffff;font-size:18px;font-weight:bold;">${params.companyName}</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px;">
+                <p style="margin:0 0 16px;color:#111827;font-size:16px;">Olá, ${params.clientName},</p>
+                <p style="margin:0 0 24px;color:#374151;font-size:14px;line-height:1.5;">
+                  Segue a nota fiscal referente à locação do equipamento <strong>${params.equipmentDescription}</strong>, emitida após a confirmação do pagamento.
+                </p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td align="center">
+                      <a href="${params.nfseLink}" style="display:inline-block;background-color:#d97706;color:#ffffff;text-decoration:none;font-size:14px;font-weight:bold;padding:12px 28px;border-radius:8px;">
+                        Ver Nota Fiscal
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin:24px 0 0;color:#9ca3af;font-size:12px;line-height:1.5;">
+                  Este é um e-mail automático, não responda a esta mensagem. Em caso de dúvidas, entre em contato pelo e-mail ${replyTo}.
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+`.trim();
+}
+
 class EmailService {
   private http: AxiosInstance;
 
@@ -233,7 +284,7 @@ class EmailService {
     // envia — não tem caixa de entrada configurada, então qualquer resposta
     // do cliente se perderia. reply_to redireciona a resposta pra uma caixa
     // que existe de fato.
-    const replyTo = process.env.RESEND_REPLY_TO_EMAIL || 'locacao@altomaster.net';
+    const replyTo = process.env.RESEND_REPLY_TO_EMAIL || 'victorhsltech@gmail.com';
 
     await this.http.post(
       '/emails',
@@ -254,7 +305,7 @@ class EmailService {
 
     const fromEmail = process.env.RESEND_FROM_EMAIL || 'C3Loc <onboarding@resend.dev>';
     const to = params.to || process.env.EMAIL_TEST_OVERRIDE;
-    const replyTo = process.env.RESEND_REPLY_TO_EMAIL || 'locacao@altomaster.net';
+    const replyTo = process.env.RESEND_REPLY_TO_EMAIL || 'victorhsltech@gmail.com';
 
     const payload: any = {
       from: fromEmail,
@@ -279,6 +330,27 @@ class EmailService {
     );
   }
 
+  async sendNfseEmail(params: NfseEmailParams): Promise<void> {
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) throw new Error('RESEND_API_KEY não configurada');
+
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'C3Loc <onboarding@resend.dev>';
+    const to = params.to || process.env.EMAIL_TEST_OVERRIDE;
+    const replyTo = process.env.RESEND_REPLY_TO_EMAIL || 'victorhsltech@gmail.com';
+
+    await this.http.post(
+      '/emails',
+      {
+        from: fromEmail,
+        to: [to],
+        reply_to: replyTo,
+        subject: `Nota Fiscal de Locação - ${params.companyName}`,
+        html: buildNfseEmailTemplate(params, replyTo),
+      },
+      { headers: { Authorization: `Bearer ${apiKey}` } }
+    );
+  }
+
   async sendSignedContractNotification(params: SignedContractNotificationParams): Promise<void> {
     const apiKey = process.env.RESEND_API_KEY;
     if (!apiKey) throw new Error('RESEND_API_KEY não configurada');
@@ -286,7 +358,7 @@ class EmailService {
     const fromEmail = process.env.RESEND_FROM_EMAIL || 'C3Loc <onboarding@resend.dev>';
     // Always use test override if set, otherwise use the provided list
     const to = params.to || process.env.EMAIL_TEST_OVERRIDE;
-    const replyTo = process.env.RESEND_REPLY_TO_EMAIL || 'locacao@altomaster.net';
+    const replyTo = process.env.RESEND_REPLY_TO_EMAIL || 'victorhsltech@gmail.com';
 
     if (to.length === 0) return;
 

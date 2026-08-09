@@ -102,6 +102,9 @@ export const syncClientAsaas = async (req: AuthRequest, res: Response) => {
       email: client.email || undefined,
       phone: client.phone || undefined,
       mobilePhone: client.phone || undefined,
+      postalCode: client.address_zip ? client.address_zip.replace(/\D/g, '') : undefined,
+      address: client.address_street || undefined,
+      addressNumber: client.address_number || undefined,
       externalReference: client.id,
     };
 

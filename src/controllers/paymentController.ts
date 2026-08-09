@@ -2,13 +2,9 @@ import { Response } from 'express';
 import { getSupabaseUserClient, supabaseAdmin } from '../config/supabase';
 import { asaasService } from '../services/asaasService';
 import { emailService } from '../services/emailService';
-import { AsaasChargeRequest, AsaasBillingType, AsaasSubaccountRequest, AsaasPaymentResponse } from '../types/asaas';
+import { AsaasChargeRequest, AsaasBillingType, AsaasPaymentResponse } from '../types/asaas';
 import { PaymentBreakdown } from '../types/payment';
 import { AuthRequest } from '../middleware/auth';
-
-const REQUIRED_SUBACCOUNT_FIELDS: (keyof AsaasSubaccountRequest)[] = [
-  'name', 'email', 'cpfCnpj', 'mobilePhone', 'address', 'addressNumber', 'province', 'postalCode', 'incomeValue',
-];
 
 // Status que não contam como "cobrança ativa" para fins de idempotência — uma
 // fatura com cobrança CANCELLED/REFUNDED pode receber uma nova cobrança.
@@ -54,82 +50,6 @@ function calculateGrossUp(billingType: AsaasBillingType, totalValue: number, set
 function buildBreakdown(totalValue: number, feeAmount: number, chargedValue: number, netValue: number | null): PaymentBreakdown {
   return { total_value: totalValue, fee_amount: feeAmount, charged_value: chargedValue, net_value: netValue };
 }
-
-export const setupSubaccount = async (req: AuthRequest, res: Response) => {
-  try {
-    const body = req.body as AsaasSubaccountRequest;
-    const missing = REQUIRED_SUBACCOUNT_FIELDS.filter((field) => body[field] === undefined || body[field] === null || body[field] === '');
-    if (missing.length > 0) {
-      return res.status(400).json({ error: `Campos obrigatórios ausentes: ${missing.join(', ')}` });
-    }
-
-    const subaccount = await asaasService.createSubaccount(body);
-
-    const supabase = getSupabaseUserClient(req.token!);
-    // erp_company_settings é config global single-tenant (não é dado do
-    // usuário) — lida sempre via supabaseAdmin para não depender de RLS e
-    // evitar criar uma segunda linha `active = true` por engano (o insert
-    // abaixo decide com base neste read).
-    const { data: existingSettings } = await supabaseAdmin
-      .from('erp_company_settings')
-      .select('id')
-      .eq('active', true)
-      .single();
-
-    const settingsPayload = {
-      company_name: body.name,
-      cnpj: body.cpfCnpj,
-      asaas_api_key: subaccount.apiKey,
-      active: true,
-    };
-
-    const { data: settings, error: settingsError } = existingSettings
-      ? await supabase
-          .from('erp_company_settings')
-          .update(settingsPayload)
-          .eq('id', existingSettings.id)
-          .select()
-          .single()
-      : await supabase
-          .from('erp_company_settings')
-          .insert(settingsPayload)
-          .select()
-          .single();
-    if (settingsError) throw settingsError;
-
-    return res.status(201).json({ subaccount, settings });
-  } catch (error: any) {
-    console.error('[setupSubaccount] Erro:', error.response?.data || error.message);
-    return res.status(500).json({ error: error.message, asaas: error.response?.data });
-  }
-};
-
-// Debug: confirma server-side (sem copy/paste manual) que a chave salva em
-// erp_company_settings.asaas_api_key é válida no Asaas.
-export const verifySubaccount = async (req: AuthRequest, res: Response) => {
-  try {
-    const { data: settings, error: settingsError } = await supabaseAdmin
-      .from('erp_company_settings')
-      .select('asaas_api_key')
-      .eq('active', true)
-      .single();
-    if (settingsError) {
-      console.error('[verifySubaccount] Erro ao ler erp_company_settings:', settingsError);
-    }
-    if (!settings?.asaas_api_key) {
-      return res.status(400).json({ error: 'Locadora sem chave Asaas configurada' });
-    }
-
-    const account = await asaasService.getMyAccount(settings.asaas_api_key);
-    return res.json({
-      keyPreview: `${settings.asaas_api_key.slice(0, 12)}...${settings.asaas_api_key.slice(-4)} (${settings.asaas_api_key.length} chars)`,
-      account,
-    });
-  } catch (error: any) {
-    console.error('[verifySubaccount] Erro:', error.response?.data || error.message);
-    return res.status(500).json({ error: error.message, asaas: error.response?.data });
-  }
-};
 
 export const createChargeForInvoice = async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
@@ -290,7 +210,7 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
         await emailService.sendBoletoEmail({
           to: client.email,
           clientName: invoice.client_name,
-          companyName: settings.company_name || 'RentDesk',
+          companyName: settings.company_name || 'C3Loc',
           totalValue: invoice.total_value,
           dueDate: charge.dueDate,
           invoiceUrl: charge.invoiceUrl || charge.bankSlipUrl || '',
