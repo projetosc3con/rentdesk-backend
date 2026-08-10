@@ -1102,7 +1102,7 @@ export const uploadSignedContract = async (req: AuthRequest, res: Response) => {
         .not('email', 'is', null);
       
       const emails = new Set<string>();
-      emails.add('locacao@altomaster.net');
+      emails.add('victorhsltech@gmail.com');
       if (logisticUsers) {
         logisticUsers.forEach(u => {
           if (u.email) emails.add(u.email);
@@ -1287,7 +1287,7 @@ export const sendContractEmail = async (req: AuthRequest, res: Response) => {
       .select('company_name')
       .eq('active', true)
       .single();
-    const companyName = settings?.company_name || 'RentDesk';
+    const companyName = settings?.company_name || 'C3Loc';
 
     // 6. Send email
     await emailService.sendContractEmail({

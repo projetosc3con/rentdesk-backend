@@ -18,6 +18,7 @@ export interface Bill {
   pix_end_to_end_id: string | null;
   bank_transaction_date: string | null;
   bank_raw_snapshot: Record<string, unknown> | null;
+  barcode: string | null;
   status: BillStatus;
   reconciled_at: string | null;
   created_by: string | null;
@@ -27,13 +28,15 @@ export interface Bill {
 
 export interface CreateBillPayload {
   type: BillType;
-  client_id?: string;
   counterparty_name?: string;
   description?: string;
+  barcode?: string;
   gross_value: number;
   due_date: string;
   already_settled?: boolean;
   settled_date?: string;
+  bank_transaction_date?: string;
+  bank_raw_snapshot?: Record<string, unknown>;
 }
 
 // Item normalizado do extrato bancário (GET /api/bills): mescla `bills`
@@ -59,5 +62,34 @@ export interface BillStatementItem {
   description: string | null;
   invoice_url: string | null;
   bank_slip_url: string | null;
+  is_reconciled: boolean;
   raw: Record<string, unknown>;
+}
+
+// Linha normalizada do extrato bancário do BB (ver bbExtratoService), já
+// mapeada pro vocabulário de `bills` (D/C -> payable/receivable).
+export interface BankStatementLine {
+  bank_date: string; // YYYY-MM-DD
+  value: number;
+  dc_indicator: 'D' | 'C';
+  type: BillType;
+  description: string | null;
+  document_number: string | null;
+  raw: Record<string, unknown>;
+}
+
+export type BankStatementMatchStatus = 'matched' | 'unmatched';
+
+export interface BankStatementMatchResult extends BankStatementLine {
+  match_status: BankStatementMatchStatus;
+  matched_bill_id: string | null;
+  matched_bill: BillStatementItem | null;
+}
+
+export interface ReconcileBankStatementResponse {
+  period: { from: string; to: string };
+  simulated: boolean;
+  lines: BankStatementMatchResult[];
+  matched_count: number;
+  unmatched_count: number;
 }

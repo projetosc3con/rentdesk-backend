@@ -1,6 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
 import {
-  AsaasSubaccountRequest, AsaasSubaccountResponse,
   AsaasCustomerRequest, AsaasCustomerResponse,
   AsaasChargeRequest, AsaasPaymentResponse,
   AsaasReceiveInCashRequest, AsaasReceiveInCashResponse,
@@ -14,8 +13,8 @@ class AsaasService {
   private http: AxiosInstance;
 
   constructor() {
-    // Sem access_token default: cada locadora tem sua própria chave de
-    // subconta, injetada por chamada (exceto createSubaccount).
+    // Sem access_token default: cada locadora tem sua própria chave (conta
+    // principal), injetada por chamada.
     this.http = axios.create({
       baseURL: ASAAS_BASE_URL,
       headers: { 'User-Agent': ASAAS_USER_AGENT, 'Content-Type': 'application/json' },
@@ -26,24 +25,10 @@ class AsaasService {
     return { headers: { access_token: apiKey } };
   }
 
-  async createSubaccount(data: AsaasSubaccountRequest): Promise<AsaasSubaccountResponse> {
-    const masterKey = process.env.ASAAS_MASTER_API_KEY;
-    if (!masterKey) throw new Error('ASAAS_MASTER_API_KEY is not configured');
-    const { data: response } = await this.http.post<AsaasSubaccountResponse>(
-      '/v3/accounts', data, this.authHeaders(masterKey)
-    );
-    return response;
-  }
-
   async createCustomer(apiKey: string, data: AsaasCustomerRequest): Promise<AsaasCustomerResponse> {
     const { data: response } = await this.http.post<AsaasCustomerResponse>(
       '/v3/customers', data, this.authHeaders(apiKey)
     );
-    return response;
-  }
-
-  async getMyAccount(apiKey: string): Promise<any> {
-    const { data: response } = await this.http.get('/v3/myAccount', this.authHeaders(apiKey));
     return response;
   }
 
