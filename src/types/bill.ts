@@ -75,6 +75,10 @@ export interface BankStatementLine {
   type: BillType;
   description: string | null;
   document_number: string | null;
+  // `textoIdentificadorUnicoTransacao` do BB — quando presente, cruza
+  // diretamente com `bills.pix_end_to_end_id` (ver reconcileBankStatement)
+  // pra um match autoritativo, sem depender de tipo+data+valor.
+  unique_transaction_id: string | null;
   raw: Record<string, unknown>;
 }
 
@@ -92,4 +96,15 @@ export interface ReconcileBankStatementResponse {
   lines: BankStatementMatchResult[];
   matched_count: number;
   unmatched_count: number;
+}
+
+// Envelope paginado de GET /api/bills — só usado no ramo "merge completo"
+// (bills + payments pendentes, sem filtros de bills). O ramo com filtros
+// (picker de lançamentos não conciliados) continua devolvendo array puro.
+export interface PaginatedBillStatement {
+  data: BillStatementItem[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
 }

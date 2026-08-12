@@ -82,18 +82,31 @@ function normalizeBbLine(raw: BbExtratoLancamentoRaw): BankStatementLine | null 
     type: dcToType(dc),
     description: raw.textoDescricaoSubHistorico ?? raw.textoInformacaoComplementar ?? null,
     document_number: raw.numeroDocumento != null ? String(raw.numeroDocumento) : null,
+    unique_transaction_id: raw.textoIdentificadorUnicoTransacao || null,
     raw: raw as unknown as Record<string, unknown>,
   };
 }
 
 export class BbApiError extends Error {
-  code: string;
+  status: number;
+  code: string | null;
   details?: Record<string, unknown>[];
 
   constructor(status: number, body: BbApiErrorResponse) {
-    super(`BB API error ${body.code} (HTTP ${status}): ${body.message}`);
-    this.code = body.code;
-    this.details = body.variaveisMonitoradas;
+    // Duas formas de erro já observadas na prática: o shape documentado da
+    // API de Extratos (plano, `code`/`message`) e um envelope de gateway
+    // (`{ errors: [...] }`, visto em 503 "Serviço temporariamente
+    // indisponível") — normaliza os dois pra sempre extrair uma mensagem
+    // legível em vez de deixar o axios usar o genérico "Request failed with
+    // status code X".
+    const gatewayError = 'errors' in body ? body.errors[0] : null;
+    const code = gatewayError?.code ?? ('code' in body ? body.code : null) ?? null;
+    const message = gatewayError?.message ?? ('message' in body ? body.message : null) ?? JSON.stringify(body);
+
+    super(`BB API error${code ? ` ${code}` : ''} (HTTP ${status}): ${message}`);
+    this.status = status;
+    this.code = code;
+    this.details = 'variaveisMonitoradas' in body ? body.variaveisMonitoradas : undefined;
   }
 }
 
@@ -126,6 +139,7 @@ function buildSimulatedLines(params: ExtratoParams): BankStatementLine[] {
       type: 'receivable',
       description: 'PIX RECEBIDO (simulado)',
       document_number: null,
+      unique_transaction_id: null,
       raw: { simulated: true, data: params.from, valorLancamento: 1250.0, indicadorSinalLancamento: 'C' },
     },
     {
@@ -135,6 +149,7 @@ function buildSimulatedLines(params: ExtratoParams): BankStatementLine[] {
       type: 'payable',
       description: 'PAGAMENTO FORNECEDOR (simulado)',
       document_number: null,
+      unique_transaction_id: null,
       raw: { simulated: true, data: midIso, valorLancamento: 480.5, indicadorSinalLancamento: 'D' },
     },
   ];
@@ -181,7 +196,7 @@ class BbExtratoService {
       return data;
     } catch (err: any) {
       const status = err.response?.status;
-      if ((status === 422 || status === 500) && err.response?.data?.code) {
+      if (status && err.response?.data) {
         throw new BbApiError(status, err.response.data as BbApiErrorResponse);
       }
       throw err;

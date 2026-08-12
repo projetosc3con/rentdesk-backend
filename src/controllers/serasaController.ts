@@ -18,7 +18,7 @@ export const consultarScore = async (req: Request, res: Response) => {
       documentToSend = clean;
     } else if (clean.length === 14) {
       tipo = 'PJ';
-      documentToSend = clean.substring(0, 8); // raiz do CNPJ
+      documentToSend = clean; // CNPJ completo (14 dígitos) — payload de exemplo da Serasa usa 14 dígitos, não a raiz de 8
     } else {
       return res.status(400).json({
         sucesso: false,

@@ -29,6 +29,13 @@ export const listBills = async (req: AuthRequest, res: Response) => {
     const supabase = getSupabaseUserClient(req.token!);
     const { client_id, status, origin, from, to, type, unreconciled } = req.query;
 
+    // Paginação só se aplica ao ramo "merge completo" abaixo (bills +
+    // payments pendentes) — é a única consulta que vira uma tabela grande
+    // sem fim. O ramo com filtros (picker de "vincular a lançamento
+    // existente") continua devolvendo array puro, sem paginar.
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(20, Math.max(1, parseInt(req.query.limit as string) || 20));
+
     let billsQuery = supabase
       .from('bills')
       .select('*, invoice:rental_invoices(invoice_number, client_name), client:clients(company_name, cnpj), payment:payments(invoice_url, bank_slip_url)')
@@ -50,8 +57,10 @@ export const listBills = async (req: AuthRequest, res: Response) => {
     // `origin`/`status`/`type`/`unreconciled` são específicos do vocabulário
     // de `bills` e não têm equivalente em `payments` (ou não fazem sentido
     // pra um picker de lançamentos existentes) — quando presentes, o usuário
-    // quer só a visão de `bills`, então pulamos o bloco de payments pendentes.
-    if (!origin && !status && !type && !unreconciled) {
+    // quer só a visão de `bills`, então pulamos o bloco de payments pendentes
+    // e, mais abaixo, também pulamos a paginação (ver isFullMerge).
+    const isFullMerge = !origin && !status && !type && !unreconciled;
+    if (isFullMerge) {
       const { data: reconciled, error: reconciledError } = await supabase
         .from('bills')
         .select('payment_id')
@@ -82,7 +91,21 @@ export const listBills = async (req: AuthRequest, res: Response) => {
       return b.due_date.localeCompare(a.due_date);
     });
 
-    return res.json(items);
+    if (!isFullMerge) {
+      return res.json(items);
+    }
+
+    // Paginação "de resposta": bills e payments são duas queries de tabelas
+    // diferentes, mescladas e ordenadas em memória (não dá pra fazer isso
+    // com ORDER BY+LIMIT direto no Postgres sem uma view/union) — então o
+    // backend ainda busca e ordena tudo, só corta a página pedida na
+    // resposta. Reduz o payload trafegado; não reduz o custo da query.
+    const total = items.length;
+    const totalPages = Math.ceil(total / limit);
+    const start = (page - 1) * limit;
+    const paginated = items.slice(start, start + limit);
+
+    return res.json({ data: paginated, total, page, limit, totalPages });
   } catch (error: any) {
     console.error('[listBills] Erro:', error.message);
     return res.status(500).json({ error: error.message });
