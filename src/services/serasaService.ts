@@ -8,6 +8,21 @@ const SERASA_IAM_TOKEN = process.env.SERASA_IAM_TOKEN || '';
 const SERASA_MODEL_PF = process.env.SERASA_MODEL_PF || '';
 const SERASA_MODEL_PJ = process.env.SERASA_MODEL_PJ || '';
 
+// entities depende do contrato com a Serasa — configurável via env (JSON), com fallback seguro para {}.
+const parseEntities = (raw: string | undefined): Record<string, unknown> => {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    console.warn('[serasaService] SERASA_ENTITIES_* inválido (JSON malformado) — usando {} como fallback.');
+    return {};
+  }
+};
+
+const SERASA_ENTITIES_PF = parseEntities(process.env.SERASA_ENTITIES_PF);
+const SERASA_ENTITIES_PJ = parseEntities(process.env.SERASA_ENTITIES_PJ);
+
 const http = axios.create({ baseURL: SERASA_BASE_URL });
 
 // Cache em memória — válido enquanto o processo estiver no ar (single instance).
@@ -39,7 +54,8 @@ export const consultarScore = async (document: string, tipo: DocumentType): Prom
   const model = tipo === 'PF' ? SERASA_MODEL_PF : SERASA_MODEL_PJ;
   if (!model) throw new Error(`Modelo Serasa não configurado para ${tipo}`);
 
-  const body: SerasaScoreRequest = { document, model, entities: {} };
+  const entities = tipo === 'PF' ? SERASA_ENTITIES_PF : SERASA_ENTITIES_PJ;
+  const body: SerasaScoreRequest = { document, model, entities };
 
   const call = (token: string) =>
     http.post<SerasaScoreResponse>(`/ascend-ops/v1/${tipo}`, body, {

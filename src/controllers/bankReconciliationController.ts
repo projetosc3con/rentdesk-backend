@@ -37,6 +37,19 @@ function resolvePeriod(from: unknown, to: unknown): { from: string; to: string }
 // manual (linkStatementLineToBill). O bill passa a refletir exatamente o que
 // está no banco (due_date/valor), além de ficar marcado como conciliado.
 async function applyBankLineToBill(supabase: ReturnType<typeof getSupabaseUserClient>, billId: string, line: BankStatementLine) {
+  const { data: existing, error: fetchError } = await supabase
+    .from('bills')
+    .select('net_value')
+    .eq('id', billId)
+    .single();
+  if (fetchError) throw fetchError;
+
+  // Mesma tolerância usada no match automático (VALUE_MATCH_TOLERANCE) — se
+  // o valor que veio do banco divergir do valor originalmente cadastrado
+  // além disso, o lançamento fica marcado como Divergente em vez de
+  // Recebido, em vez de sobrescrever o valor original sem sinalizar nada.
+  const isDivergent = Math.abs(existing.net_value - line.value) > VALUE_MATCH_TOLERANCE;
+
   const { data, error } = await supabase
     .from('bills')
     .update({
@@ -45,7 +58,7 @@ async function applyBankLineToBill(supabase: ReturnType<typeof getSupabaseUserCl
       net_value: line.value,
       bank_transaction_date: line.bank_date,
       bank_raw_snapshot: line.raw,
-      status: 'Recebido',
+      status: isDivergent ? 'Divergente' : 'Recebido',
       reconciled_at: new Date().toISOString(),
     })
     .eq('id', billId)
@@ -57,12 +70,19 @@ async function applyBankLineToBill(supabase: ReturnType<typeof getSupabaseUserCl
 
 // Concilia o extrato bancário do BB (por período, default últimos 30 dias)
 // contra os `bills` ainda não conciliados (`bank_transaction_date IS NULL`).
-// Match = mesmo tipo (D->payable, C->receivable) + valor dentro de
-// VALUE_MATCH_TOLERANCE + due_date dentro de DATE_MATCH_TOLERANCE_DAYS.
-// Cada bill só pode ser consumido por uma linha por execução. A tabela de
-// extrato em si NÃO é persistida — só o resultado desta chamada (linhas +
-// match) volta pro front, que guarda isso em estado local; os `bills`
-// batidos são atualizados no banco via applyBankLineToBill.
+// Match, em ordem de prioridade: (1) forte, unique_transaction_id da linha
+// == pix_end_to_end_id do bill (autoritativo); (2) fallback frouxo, mesmo
+// tipo (D->payable, C->receivable) + valor dentro de VALUE_MATCH_TOLERANCE +
+// due_date dentro de DATE_MATCH_TOLERANCE_DAYS — usado só quando não há
+// identificador forte dos dois lados (bill manual, ou repasse PIX ainda
+// simulado). O critério frouxo é ambíguo por natureza: se dois bills
+// diferentes tiverem tipo/valor/data parecidos, ele pode casar com o errado
+// — ambiguidade não tratada por ora (não bloqueia nem sinaliza, só casa com
+// o primeiro candidato encontrado). Cada bill só pode ser consumido por uma
+// linha por execução. A tabela de extrato em si NÃO é persistida — só o
+// resultado desta chamada (linhas + match) volta pro front, que guarda isso
+// em estado local; os `bills` batidos são atualizados no banco via
+// applyBankLineToBill.
 export const reconcileBankStatement = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
@@ -70,27 +90,49 @@ export const reconcileBankStatement = async (req: AuthRequest, res: Response) =>
 
     const { simulated, lines } = await bbExtratoService.fetchExtrato(period);
 
-    const candidateWindowStart = toIsoDate(new Date(new Date(period.from).getTime() - DATE_MATCH_TOLERANCE_DAYS * 86400000));
-    const candidateWindowEnd = toIsoDate(new Date(new Date(period.to).getTime() + DATE_MATCH_TOLERANCE_DAYS * 86400000));
-
+    // Sem filtro de due_date aqui de propósito: o match forte por
+    // unique_transaction_id/pix_end_to_end_id precisa poder alcançar um bill
+    // mesmo que o cliente tenha pago fora da janela esperada (ex: fatura
+    // vencida há semanas, quitada com atraso) — restringir por due_date
+    // faria esse bill nunca aparecer entre os candidatos, mesmo tendo o
+    // identificador forte batendo. O critério frouxo (fallback) já aplica
+    // sua própria checagem de proximidade de data em memória logo abaixo,
+    // então não perde precisão por não filtrar aqui. Aceitável escanear
+    // todos os bills não conciliados: sistema single-tenant, baixo volume.
     const { data: candidates, error: candidatesError } = await supabase
       .from('bills')
       .select('*, invoice:rental_invoices(invoice_number, client_name), client:clients(company_name, cnpj)')
-      .is('bank_transaction_date', null)
-      .gte('due_date', candidateWindowStart)
-      .lte('due_date', candidateWindowEnd);
+      .is('bank_transaction_date', null);
     if (candidatesError) throw candidatesError;
 
     const availableCandidates = [...(candidates ?? [])];
     const results: BankStatementMatchResult[] = [];
 
     for (const line of lines) {
-      const matchIndex = availableCandidates.findIndex((bill) =>
-        bill.type === line.type &&
-        bill.due_date != null &&
-        daysBetween(bill.due_date, line.bank_date) <= DATE_MATCH_TOLERANCE_DAYS &&
-        Math.abs(bill.net_value - line.value) <= VALUE_MATCH_TOLERANCE
-      );
+      // Match forte: `unique_transaction_id` do extrato (identificador único
+      // da transação no BB) bate exatamente com `bills.pix_end_to_end_id`
+      // (gravado só quando o repasse PIX real acontece — ver bbPixService).
+      // É autoritativo: pula o critério frouxo abaixo por completo, então
+      // não sofre com colisão de tipo+data+valor entre bills diferentes
+      // (ex: dois clientes com parcela do mesmo valor vencendo na mesma
+      // semana — sem esse match forte, o critério frouxo pode casar com o
+      // bill errado e sobrescrever os dados dele com os dessa linha).
+      let matchIndex = line.unique_transaction_id
+        ? availableCandidates.findIndex((bill) => bill.pix_end_to_end_id === line.unique_transaction_id)
+        : -1;
+
+      // Fallback frouxo: só entra em jogo quando não há identificador forte
+      // dos dois lados — bill manual (nunca tem pix_end_to_end_id) ou repasse
+      // PIX ainda simulado (ENABLE_BB_PIX_TRANSFER=false não grava endToEndId
+      // real). Mantém o comportamento anterior pra esses casos.
+      if (matchIndex === -1) {
+        matchIndex = availableCandidates.findIndex((bill) =>
+          bill.type === line.type &&
+          bill.due_date != null &&
+          daysBetween(bill.due_date, line.bank_date) <= DATE_MATCH_TOLERANCE_DAYS &&
+          Math.abs(bill.net_value - line.value) <= VALUE_MATCH_TOLERANCE
+        );
+      }
 
       if (matchIndex === -1) {
         results.push({ ...line, match_status: 'unmatched', matched_bill_id: null, matched_bill: null });

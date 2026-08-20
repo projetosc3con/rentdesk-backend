@@ -91,9 +91,20 @@ export interface BbExtratoResponseRaw {
   listaLancamento: BbExtratoLancamentoRaw[];
 }
 
-// Corpo de erro 422 ("Erro Negocial") / 500 ("Erro Sistema") da API de Extratos.
-export interface BbApiErrorResponse {
+// Corpo de erro 422 ("Erro Negocial") / 500 ("Erro Sistema") da API de Extratos,
+// conforme a doc oficial (shape plano).
+export interface BbApiErrorResponseFlat {
   code: string;
   message: string;
   variaveisMonitoradas?: Record<string, unknown>[];
 }
+
+// Envelope de erro do gateway (observado empiricamente em 503 "Serviço
+// temporariamente indisponível", fora da doc de Extratos — provavelmente
+// comum a outras falhas de infraestrutura do gateway BB, não específico
+// desta API).
+export interface BbApiErrorResponseGateway {
+  errors: Array<{ code: string; title?: string; message: string }>;
+}
+
+export type BbApiErrorResponse = BbApiErrorResponseFlat | BbApiErrorResponseGateway;

@@ -3,7 +3,7 @@ export type DocumentType = 'PF' | 'PJ';
 export interface SerasaLoginResponse {
   accessToken: string;
   tokenType: string;
-  expiresIn: string;
+  expiresIn: number | string;
   scope: string;
 }
 

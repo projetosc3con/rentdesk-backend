@@ -7,7 +7,11 @@ import { emailService } from '../services/emailService';
 
 const FAILED_NFSE_STATUSES = ['ERRO', 'ERROR'];
 
-const PAID_EVENTS = ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED'];
+// Ambos os eventos indicam que o pagamento foi efetuado e atualizam
+// payments.status — mas só PAYMENT_RECEIVED garante que o valor já está
+// disponível no saldo Asaas (ver markPaymentAsPaid). PAYMENT_CONFIRMED
+// (típico em boleto, antes da compensação bancária) só reflete status.
+const PAYMENT_STATUS_EVENTS = ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED'];
 
 export const handleAsaasWebhook = async (req: Request, res: Response) => {
   try {
@@ -39,7 +43,7 @@ export const handleAsaasWebhook = async (req: Request, res: Response) => {
     // Erro aqui não deve derrubar o 200 (senão o Asaas reentrega em loop) —
     // fica logado no console e a linha correspondente em asaas_webhook_logs
     // permanece com processed=false, sinalizando que precisa de atenção.
-    if (PAID_EVENTS.includes(payload.event) && payload.payment?.id) {
+    if (PAYMENT_STATUS_EVENTS.includes(payload.event) && payload.payment?.id) {
       try {
         await markPaymentAsPaid(payload);
       } catch (processingError: any) {
@@ -151,7 +155,17 @@ async function markPaymentAsPaid(payload: AsaasWebhookPayload) {
     .eq('id', payment.id);
   if (paymentError) throw paymentError;
 
-  await createBillAndTransferPix(payment, payload, realNetValue);
+  // Repasse PIX + bill conciliado só quando o valor está de fato disponível
+  // no saldo Asaas (PAYMENT_RECEIVED) — PAYMENT_CONFIRMED não garante saldo
+  // (ver doc oficial Asaas: "saldo ainda não foi disponibilizado").
+  if (payload.event === 'PAYMENT_RECEIVED') {
+    await createBillAndTransferPix(payment, payload, realNetValue);
+  }
+
+  // NF-e continua no primeiro evento pago (CONFIRMED ou RECEIVED) — pedido
+  // original do Victor; a própria função já é idempotente (pula se já existe
+  // uma NFS-e não-falha pra essa fatura), então repetir a chamada quando
+  // RECEIVED chegar depois de CONFIRMED não duplica nada.
   await emitNfseAndNotifyClient(payment);
 
   const { error: logError } = await supabaseAdmin
@@ -166,10 +180,10 @@ async function markPaymentAsPaid(payload: AsaasWebhookPayload) {
 // se falhar aqui, o log fica com processed=false (sinaliza que precisa de
 // atencao), em vez de esconder que o repasse/lancamento nao aconteceu.
 //
-// Idempotencia: PAID_EVENTS inclui PAYMENT_RECEIVED e PAYMENT_CONFIRMED - se o
-// Asaas disparar os dois pro mesmo pagamento, o segundo evento nao pode gerar
-// um novo PIX nem uma segunda linha em bills. Por isso o check por
-// payment_id roda ANTES de chamar o BB, nao so antes do insert.
+// Idempotencia: só PAYMENT_RECEIVED chama essa função (ver markPaymentAsPaid),
+// mas o Asaas pode reentregar o mesmo evento mais de uma vez - o check por
+// payment_id roda ANTES de chamar o BB, nao so antes do insert, pra nao gerar
+// um segundo PIX nem uma segunda linha em bills numa reentrega.
 async function createBillAndTransferPix(
   payment: { id: string; invoice_id: string; client_id: string; due_date: string },
   payload: AsaasWebhookPayload,
