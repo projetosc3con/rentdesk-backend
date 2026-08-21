@@ -1,4 +1,4 @@
-export type BillOrigin = 'ASAAS' | 'MANUAL';
+export type BillOrigin = 'ASAAS' | 'MANUAL' | 'NFE';
 export type BillType = 'receivable' | 'payable';
 export type BillStatus = 'Pendente' | 'Atrasado' | 'Recebido' | 'Divergente' | 'No prazo';
 

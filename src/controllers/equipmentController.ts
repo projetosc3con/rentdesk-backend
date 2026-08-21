@@ -72,9 +72,13 @@ export const getEquipmentById = async (req: AuthRequest, res: Response) => {
 export const createEquipment = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
+    const insertData = {
+      ...req.body,
+      created_by: req.user?.id || req.body.created_by || null,
+    };
     const { data, error } = await supabase
       .from('equipments')
-      .insert([req.body])
+      .insert([insertData])
       .select()
       .single();
 

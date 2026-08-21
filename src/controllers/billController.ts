@@ -54,13 +54,13 @@ export const listBills = async (req: AuthRequest, res: Response) => {
 
     const items: BillStatementItem[] = (bills ?? []).map(normalizeBill);
 
-    // `origin`/`status`/`type`/`unreconciled` são específicos do vocabulário
-    // de `bills` e não têm equivalente em `payments` (ou não fazem sentido
-    // pra um picker de lançamentos existentes) — quando presentes, o usuário
-    // quer só a visão de `bills`, então pulamos o bloco de payments pendentes
-    // e, mais abaixo, também pulamos a paginação (ver isFullMerge).
-    const isFullMerge = !origin && !status && !type && !unreconciled;
-    if (isFullMerge) {
+    // Inclui pagamentos Asaas pendentes de reconciliação caso o filtro permita (tipo receivable e origem ASAAS ou sem filtro)
+    const shouldIncludePayments =
+      unreconciled !== 'true' &&
+      (!type || type === 'receivable') &&
+      (!origin || origin === 'ASAAS');
+
+    if (shouldIncludePayments) {
       const { data: reconciled, error: reconciledError } = await supabase
         .from('bills')
         .select('payment_id')
@@ -78,6 +78,14 @@ export const listBills = async (req: AuthRequest, res: Response) => {
       if (from) paymentsQuery = paymentsQuery.gte('due_date', from as string);
       if (to) paymentsQuery = paymentsQuery.lte('due_date', to as string);
 
+      if (status) {
+        if (status === 'Pendente') paymentsQuery = paymentsQuery.eq('status', 'PENDING');
+        else if (status === 'Atrasado') paymentsQuery = paymentsQuery.eq('status', 'OVERDUE');
+        else if (status === 'Recebido') paymentsQuery = paymentsQuery.eq('status', 'RECEIVED');
+        else if (status === 'Aguardando compensação') paymentsQuery = paymentsQuery.eq('status', 'CONFIRMED');
+        else paymentsQuery = paymentsQuery.eq('status', '__NONE__');
+      }
+
       const { data: payments, error: paymentsError } = await paymentsQuery;
       if (paymentsError) throw paymentsError;
 
@@ -91,17 +99,14 @@ export const listBills = async (req: AuthRequest, res: Response) => {
       return b.due_date.localeCompare(a.due_date);
     });
 
-    if (!isFullMerge) {
+    // Se a rota foi chamada especificamente para o modal de conciliação (unreconciled === 'true'), retorna array simples
+    if (unreconciled === 'true') {
       return res.json(items);
     }
 
-    // Paginação "de resposta": bills e payments são duas queries de tabelas
-    // diferentes, mescladas e ordenadas em memória (não dá pra fazer isso
-    // com ORDER BY+LIMIT direto no Postgres sem uma view/union) — então o
-    // backend ainda busca e ordena tudo, só corta a página pedida na
-    // resposta. Reduz o payload trafegado; não reduz o custo da query.
+    // Retorno paginado padrão para a tabela do extrato
     const total = items.length;
-    const totalPages = Math.ceil(total / limit);
+    const totalPages = Math.max(1, Math.ceil(total / limit));
     const start = (page - 1) * limit;
     const paginated = items.slice(start, start + limit);
 

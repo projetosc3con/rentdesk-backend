@@ -4,6 +4,8 @@ import * as partController from '../controllers/partController';
 const router = Router();
 
 router.get('/', partController.getAllParts);
+router.get('/movements', partController.listMovements);
+router.get('/next-code', partController.getNextInternalCode);
 router.get('/:id', partController.getPartById);
 router.post('/', partController.createPart);
 router.put('/:id', partController.updatePart);

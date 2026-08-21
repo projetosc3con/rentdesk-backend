@@ -346,13 +346,24 @@ async function handleTransferEvent(payload: AsaasWebhookPayload) {
   }
 }
 
-// Emite a NFS-e automaticamente quando o pagamento é confirmado (pedido do
-// Victor: "coloca isso naquele endpoint que recebe a confirmação de
-// pagamento") e envia por e-mail pro cliente. Roda depois do repasse PIX,
-// mesma lógica de idempotência da baixa acima: se já existe uma NFS-e não
-// falha para esta fatura (emissão manual anterior, ou reentrega do mesmo
-// evento), pula em vez de emitir de novo.
+// Emite a NFS-e automaticamente (ou envia a Fatura de Locação de Bens Móveis)
+// quando o pagamento é confirmado e notifica o cliente por e-mail.
 async function emitNfseAndNotifyClient(payment: { invoice_id: string; client_id: string }) {
+  const { data: invoice } = await supabaseAdmin
+    .from('rental_invoices')
+    .select('id, client_id, equipment_name, client_name, document_type, invoice_number, total_value, fatura_pdf_url')
+    .eq('id', payment.invoice_id)
+    .single();
+
+  if (!invoice) return;
+
+  // Se o documento fiscal configurado for FATURA_LOCACAO, envia a Fatura de Locação e não emite NFS-e municipal
+  if (invoice.document_type === 'FATURA_LOCACAO') {
+    console.log(`[emitNfseAndNotifyClient] Fatura ${payment.invoice_id} configurada como FATURA_LOCACAO - enviando e-mail de fatura e pulando NFS-e.`);
+    await sendFaturaEmailForInvoice(invoice);
+    return;
+  }
+
   const { data: existingNfse } = await supabaseAdmin
     .from('invoice_nfse')
     .select('status')
@@ -395,6 +406,33 @@ async function emitNfseAndNotifyClient(payment: { invoice_id: string; client_id:
   await sendNfseEmailForInvoice(payment.invoice_id, nfse.nfse_link);
 }
 
+// Dispara e-mail com a Fatura de Locação de Bens Móveis
+async function sendFaturaEmailForInvoice(invoice: any) {
+  const { data: client } = await supabaseAdmin
+    .from('clients')
+    .select('email, company_name')
+    .eq('id', invoice.client_id)
+    .single();
+  if (!client?.email) return;
+
+  const { data: settings } = await supabaseAdmin
+    .from('erp_company_settings')
+    .select('company_name')
+    .eq('active', true)
+    .single();
+  const companyName = settings?.company_name || 'C3Loc';
+
+  await emailService.sendFaturaLocacaoEmail({
+    to: client.email,
+    clientName: client.company_name || invoice.client_name || 'Cliente',
+    companyName,
+    equipmentDescription: invoice.equipment_name || 'Equipamento',
+    faturaNumber: invoice.invoice_number,
+    totalValue: Number(invoice.total_value) || 0,
+    faturaLink: invoice.fatura_pdf_url || undefined,
+  });
+}
+
 // Compartilhado entre a emissão síncrona (emitNfseAndNotifyClient, quando o
 // pdfUrl já vem pronto na resposta de criação) e o evento assíncrono
 // INVOICE_AUTHORIZED (handleInvoiceEvent, quando o link só fica disponível
@@ -419,13 +457,14 @@ async function sendNfseEmailForInvoice(invoiceId: string, nfseLink: string) {
     .select('company_name')
     .eq('active', true)
     .single();
+  const companyName = settings?.company_name || 'C3Loc';
 
   try {
     await emailService.sendNfseEmail({
       to: client.email,
-      clientName: client.company_name || invoice.client_name || '',
-      companyName: settings?.company_name || 'C3Loc',
-      equipmentDescription: invoice.equipment_name || '',
+      clientName: client.company_name || invoice.client_name || 'Cliente',
+      companyName,
+      equipmentDescription: invoice.equipment_name || 'Equipamento',
       nfseLink,
     });
   } catch (emailError: any) {

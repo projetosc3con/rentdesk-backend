@@ -131,7 +131,13 @@ export const finishProcessing = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);
     const { id } = req.params;
-    const { equipment_id } = req.body;
+    const {
+      equipment_id,
+      billing_method = 'ASAAS',
+      manual_due_date,
+      document_type = 'FATURA_LOCACAO',
+      fatura_pdf_url,
+    } = req.body;
 
     // Fetch contract with full relationship data
     const { data: contract, error: fetchError } = await supabase
@@ -139,10 +145,8 @@ export const finishProcessing = async (req: AuthRequest, res: Response) => {
       .select(`
         *,
         deal:crm_deals!crm_deal_contracts_deal_id_fkey(
-          id,
-          title,
-          client_id,
-          client:clients(id, company_name, cnpj),
+          id, title, value, client_id, lead_id,
+          client:clients(id, company_name, cnpj, asaas_customer_id, email, phone, address_street, address_number, address_city, address_state),
           lead:crm_leads(id, company_name, cnpj)
         ),
         contract_form:crm_deal_contract_forms(*)
@@ -175,16 +179,17 @@ export const finishProcessing = async (req: AuthRequest, res: Response) => {
     const client = deal.client || {};
     const lead = deal.lead || {};
 
-    // Negociação vinculada a Lead (não a Cliente) não tem cadastro faturável
-    // (sem CNPJ validado/asaas_customer_id) — bloqueia aqui em vez de criar
-    // uma fatura órfã (client_id null) que só falharia mais tarde, na hora
-    // de gerar o boleto, com um erro confuso ("Cliente sem cadastro Asaas").
     const resolvedClientId = client.id || deal.client_id || null;
     if (!resolvedClientId) {
       return res.status(400).json({
         error: 'Este contrato está vinculado a um Lead, não a um Cliente. Converta o Lead em Cliente (CRM → Leads → Converter) antes de finalizar o processamento.'
       });
     }
+
+    const totalValue = Number(form.cost_total) || 0;
+    const finalDueDate = (billing_method === 'MANUAL' && manual_due_date)
+      ? manual_due_date
+      : (form.period_end || null);
 
     // 1. Create the rental invoice
     const invoicePayload = {
@@ -198,19 +203,20 @@ export const finishProcessing = async (req: AuthRequest, res: Response) => {
       work_site: form.work_site || null,
       billing_period_start: form.period_start || null,
       billing_period_end: form.period_end || null,
-      // Escopo confirmado: a triagem só emite boleto (POST /payments/invoices/:id/charge
-      // logo em seguida, no frontend) — sem isso, o gross-up trata o billing_type
-      // ausente como 'UNDEFINED' e não aplica nenhum ajuste de taxa.
-      payment_method: 'BOLETO',
+      payment_method: billing_method === 'MANUAL' ? 'MANUAL' : 'BOLETO',
+      billing_method,
+      document_type,
+      manual_due_date: manual_due_date || null,
+      fatura_pdf_url: fatura_pdf_url || null,
       cost_rental: form.cost_rental || 0,
       cost_insurance: form.cost_insurance || 0,
       cost_freight: form.cost_freight || 0,
       cost_rcd: form.cost_rcd || 0,
       cost_third_party: form.cost_third_party || 0,
       cost_training: form.cost_training || 0,
-      total_value: form.cost_total || 0,
-      due_date: form.period_end || null,
-      billing_status: 'Pendente',
+      total_value: totalValue,
+      due_date: finalDueDate,
+      billing_status: billing_method === 'MANUAL' ? 'Faturado' : 'Pendente',
       reconciliation_status: 'Atrasado',
       created_by: req.user?.id || null
     };
@@ -222,6 +228,33 @@ export const finishProcessing = async (req: AuthRequest, res: Response) => {
       .single();
 
     if (invoiceError) throw invoiceError;
+
+    // Se for faturamento manual, gera lançamento automático em bills (contas a receber)
+    if (billing_method === 'MANUAL') {
+      const clientDisplayName = form.locatario_company_name || client.company_name || lead.company_name || 'Cliente';
+      const billDescription = `Locação - Contrato ${contract.contract_number || 'N/A'} - ${clientDisplayName}`;
+
+      const { error: billError } = await supabase
+        .from('bills')
+        .insert({
+          origin: 'MANUAL',
+          type: 'receivable',
+          rental_invoice_id: newInvoice.id,
+          client_id: resolvedClientId,
+          counterparty_name: clientDisplayName,
+          description: billDescription,
+          gross_value: totalValue,
+          net_value: totalValue,
+          fee_amount: 0,
+          due_date: finalDueDate || new Date().toISOString().split('T')[0],
+          status: 'Pendente',
+          created_by: req.user?.id || null
+        });
+
+      if (billError) {
+        console.error('[finishProcessing] Erro ao criar lançamento em bills para faturamento manual:', billError);
+      }
+    }
 
     // 2. Update contract status and link the rental_invoice_id
     const { data: updatedContract, error: updateError } = await supabase

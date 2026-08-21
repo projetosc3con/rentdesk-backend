@@ -16,35 +16,18 @@ interface FeeSettings {
   asaas_pix_fee_percent: number | null;
 }
 
-// Regra de negócio: o valor líquido recebido pela locadora deve igualar o
-// total_value da fatura, então o valor cobrado é aumentado ("gross-up") pela
-// taxa que o Asaas vai descontar.
+// Regra de negócio: o valor cobrado do cliente no boleto/pix é exatamente o total_value
+// da fatura/contrato (sem repasse de taxa). A taxa Asaas é descontada do valor bruto.
 function calculateGrossUp(billingType: AsaasBillingType, totalValue: number, settings: FeeSettings) {
-  const totalCents = Math.round(totalValue * 100);
-
+  let feeAmount = 0;
   if (billingType === 'BOLETO') {
-    if (settings.asaas_boleto_fee_amount == null) {
-      console.warn('[createChargeForInvoice] asaas_boleto_fee_amount não configurado — cobrando sem gross-up');
-      return { feeAmount: 0, chargedValue: totalValue };
-    }
-    const feeCents = Math.round(settings.asaas_boleto_fee_amount * 100);
-    return { feeAmount: feeCents / 100, chargedValue: (totalCents + feeCents) / 100 };
+    feeAmount = settings.asaas_boleto_fee_amount != null ? Number(settings.asaas_boleto_fee_amount) : 0;
+  } else if (billingType === 'PIX') {
+    feeAmount = settings.asaas_pix_fee_percent != null ? Number((totalValue * settings.asaas_pix_fee_percent).toFixed(2)) : 0;
   }
 
-  if (billingType === 'PIX') {
-    if (settings.asaas_pix_fee_percent == null) {
-      console.warn('[createChargeForInvoice] asaas_pix_fee_percent não configurado — cobrando sem gross-up');
-      return { feeAmount: 0, chargedValue: totalValue };
-    }
-    // Taxa Pix é percentual sobre o valor cobrado (não sobre o total_value):
-    // charged * (1 - pct) = total_value  =>  charged = total_value / (1 - pct)
-    const chargedCents = Math.round(totalCents / (1 - settings.asaas_pix_fee_percent));
-    return { feeAmount: (chargedCents - totalCents) / 100, chargedValue: chargedCents / 100 };
-  }
-
-  // CREDIT_CARD, DEBIT_CARD, TRANSFER, DEPOSIT, UNDEFINED: taxa variável/
-  // percentual de cartão fora de escopo — cobra total_value sem ajuste.
-  return { feeAmount: 0, chargedValue: totalValue };
+  // O valor cobrado é exatamente o total da fatura/contrato
+  return { feeAmount, chargedValue: totalValue };
 }
 
 function buildBreakdown(totalValue: number, feeAmount: number, chargedValue: number, netValue: number | null): PaymentBreakdown {
@@ -163,6 +146,8 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
       .update({ billing_status: 'Faturado' })
       .eq('id', invoice.id);
 
+    const projectedNet = Number((invoice.total_value - feeAmount).toFixed(2));
+
     const { data: payment, error: paymentError } = await supabase
       .from('payments')
       .insert({
@@ -172,7 +157,7 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
         billing_type: charge.billingType,
         value: charge.value,
         net_value: charge.netValue,
-        net_value_projected: invoice.total_value,
+        net_value_projected: charge.netValue ?? projectedNet,
         invoice_url: charge.invoiceUrl ?? null,
         bank_slip_url: charge.bankSlipUrl ?? null,
         due_date: charge.dueDate,
@@ -202,7 +187,7 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
       throw paymentError;
     }
 
-    const divergent = Math.abs(charge.netValue - invoice.total_value) >= CENTS_TOLERANCE;
+    const divergent = Math.abs(charge.value - invoice.total_value) >= CENTS_TOLERANCE;
 
     let emailSent = false;
     if (client.email) {
@@ -226,9 +211,9 @@ export const createChargeForInvoice = async (req: AuthRequest, res: Response) =>
       invoice_id: invoice.id,
       charge,
       payment,
-      breakdown: buildBreakdown(invoice.total_value, feeAmount, chargedValue, charge.netValue),
+      breakdown: buildBreakdown(invoice.total_value, feeAmount, chargedValue, charge.netValue ?? projectedNet),
       email_sent: emailSent,
-      ...(divergent ? { warning: `net_value do Asaas (${charge.netValue}) diverge do total_value da fatura (${invoice.total_value}) — taxa em erp_company_settings pode estar desatualizada` } : {}),
+      ...(divergent ? { warning: `Valor cobrado no Asaas (${charge.value}) diverge do total da fatura (${invoice.total_value})` } : {}),
     });
   } catch (error: any) {
     console.error('[createChargeForInvoice] Erro:', error.response?.data || error.message);

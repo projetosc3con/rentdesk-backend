@@ -80,6 +80,42 @@ class AsaasService {
     return response;
   }
 
+  // Consulta o saldo atual da conta Asaas
+  async getBalance(apiKey: string): Promise<{ balance: number; totalReceivables?: number; anticipatedBalance?: number }> {
+    const { data: response } = await this.http.get<{ balance: number; totalReceivables?: number; anticipatedBalance?: number }>(
+      '/v3/finance/balance', this.authHeaders(apiKey)
+    );
+    return response;
+  }
+
+  // Consulta as tarifas e condições contratuais da conta Asaas
+  async getFees(apiKey: string): Promise<any> {
+    const { data: response } = await this.http.get(
+      '/v3/myAccount/fees', this.authHeaders(apiKey)
+    );
+    return response;
+  }
+
+  // Realiza consulta Serasa / Bureau de Crédito no Asaas
+  async createCreditBureauReport(apiKey: string, data: { cpfCnpj: string; state?: string; customer?: string }): Promise<any> {
+    const { data: response } = await this.http.post(
+      '/v3/creditBureauReport', data, this.authHeaders(apiKey)
+    );
+    return response;
+  }
+
+  // Lista consultas de crédito realizadas para um CPF/CNPJ
+  async getCreditBureauReports(apiKey: string, cpfCnpj: string): Promise<any> {
+    const { data: response } = await this.http.get(
+      '/v3/creditBureauReport',
+      {
+        ...this.authHeaders(apiKey),
+        params: { cpfCnpj }
+      }
+    );
+    return response;
+  }
+
   // Transfere saldo da conta Asaas pra uma chave Pix externa — é essa chamada
   // (e não nenhuma API do BB) que efetivamente move o valor recebido pra fora
   // do Asaas. A resposta costuma vir com status PENDING/BANK_PROCESSING, não

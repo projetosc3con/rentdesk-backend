@@ -107,40 +107,42 @@ describe('paymentRoutes', () => {
       expect(res.body.error).toMatch(/asaas_customer_id/);
     });
 
-    it('gross-up de BOLETO soma a taxa fixa configurada ao valor cobrado', async () => {
+    it('cobrança de BOLETO emite o valor total exato do contrato (sem repassar taxa ao cliente)', async () => {
       const client = makeClient({ asaas_customer_id: 'cus_1' });
       const invoice = makeInvoice({ client_id: client.id, total_value: 1000, payment_method: 'BOLETO' });
       db.seed('rental_invoices', [invoice]);
       db.seed('clients', [client]);
       db.seed('erp_company_settings', [makeSettings({ asaas_boleto_fee_amount: 3.49 })]);
-      vi.mocked(asaasService.createCharge).mockResolvedValue(asaasCharge({ value: 1003.49, netValue: 1000 }));
+      vi.mocked(asaasService.createCharge).mockResolvedValue(asaasCharge({ value: 1000, netValue: 996.51 }));
 
       const res = await request(app)
         .post(`/api/payments/invoices/${invoice.id}/charge`)
         .set('x-test-profile', profileHeader('Financeiro'));
 
       expect(res.status).toBe(201);
-      expect(vi.mocked(asaasService.createCharge).mock.calls[0][1].value).toBeCloseTo(1003.49, 2);
+      expect(vi.mocked(asaasService.createCharge).mock.calls[0][1].value).toBe(1000);
       expect(res.body.breakdown.fee_amount).toBeCloseTo(3.49, 2);
+      expect(res.body.breakdown.charged_value).toBe(1000);
       expect(res.body.email_sent).toBe(true);
     });
 
-    it('gross-up de PIX aplica taxa percentual sobre o valor cobrado (não sobre o total)', async () => {
+    it('cobrança de PIX emite o valor total exato do contrato (sem repassar taxa ao cliente)', async () => {
       const client = makeClient({ asaas_customer_id: 'cus_1' });
       const invoice = makeInvoice({ client_id: client.id, total_value: 1000, payment_method: 'PIX' });
       db.seed('rental_invoices', [invoice]);
       db.seed('clients', [client]);
       db.seed('erp_company_settings', [makeSettings({ asaas_pix_fee_percent: 0.01 })]);
       vi.mocked(asaasService.createCharge).mockImplementation(async (_key, data) =>
-        asaasCharge({ value: data.value, netValue: 1000 })
+        asaasCharge({ value: data.value, netValue: 990 })
       );
 
       const res = await request(app)
         .post(`/api/payments/invoices/${invoice.id}/charge`)
         .set('x-test-profile', profileHeader('Financeiro'));
 
-      // charged * (1 - 0.01) = 1000 => charged = 1010.10 (arredondado a centavos)
-      expect(res.body.breakdown.charged_value).toBeCloseTo(1010.1, 1);
+      expect(res.status).toBe(201);
+      expect(res.body.breakdown.charged_value).toBe(1000);
+      expect(res.body.breakdown.fee_amount).toBe(10);
     });
 
     it('sem taxa configurada, cobra o total_value sem gross-up e não quebra', async () => {

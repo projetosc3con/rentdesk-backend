@@ -260,6 +260,71 @@ function buildNfseEmailTemplate(params: NfseEmailParams, replyTo: string): strin
 `.trim();
 }
 
+interface FaturaLocacaoEmailParams {
+  to: string;
+  clientName: string;
+  companyName: string;
+  equipmentDescription: string;
+  faturaNumber?: string;
+  totalValue: number;
+  faturaLink?: string;
+  pdfBase64?: string;
+  pdfFilename?: string;
+}
+
+function buildFaturaLocacaoEmailTemplate(params: FaturaLocacaoEmailParams, replyTo: string): string {
+  return `
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <body style="margin:0;padding:0;background-color:#f4f4f5;font-family:Arial,Helvetica,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f5;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;overflow:hidden;">
+            <tr>
+              <td style="background-color:#1f2937;padding:24px 32px;">
+                <span style="color:#ffffff;font-size:18px;font-weight:bold;">${params.companyName}</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px;">
+                <p style="margin:0 0 16px;color:#111827;font-size:16px;">Olá, ${params.clientName},</p>
+                <p style="margin:0 0 24px;color:#374151;font-size:14px;line-height:1.5;">
+                  Segue a <strong>Fatura de Locação de Bens Móveis</strong> ${params.faturaNumber ? `(Nº ${params.faturaNumber})` : ''} referente ao equipamento <strong>${params.equipmentDescription}</strong>.
+                </p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f9fafb;border-radius:8px;margin-bottom:24px;">
+                  <tr>
+                    <td style="padding:16px 20px;">
+                      <p style="margin:0 0 8px;color:#6b7280;font-size:12px;text-transform:uppercase;">Valor Total</p>
+                      <p style="margin:0 0 8px;color:#111827;font-size:20px;font-weight:bold;">${formatCurrency(params.totalValue)}</p>
+                    </td>
+                  </tr>
+                </table>
+                ${params.faturaLink ? `
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+                  <tr>
+                    <td align="center">
+                      <a href="${params.faturaLink}" style="display:inline-block;background-color:#d97706;color:#ffffff;text-decoration:none;font-size:14px;font-weight:bold;padding:12px 28px;border-radius:8px;">
+                        Visualizar Fatura de Locação
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+                ` : ''}
+                <p style="margin:24px 0 0;color:#9ca3af;font-size:12px;line-height:1.5;">
+                  Este é um e-mail automático, não responda a esta mensagem. Em caso de dúvidas, entre em contato pelo e-mail ${replyTo}.
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+`.trim();
+}
+
 class EmailService {
   private http: AxiosInstance;
 
@@ -347,6 +412,36 @@ class EmailService {
         subject: `Nota Fiscal de Locação - ${params.companyName}`,
         html: buildNfseEmailTemplate(params, replyTo),
       },
+      { headers: { Authorization: `Bearer ${apiKey}` } }
+    );
+  }
+
+  async sendFaturaLocacaoEmail(params: FaturaLocacaoEmailParams): Promise<void> {
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) throw new Error('RESEND_API_KEY não configurada');
+
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'C3Loc <onboarding@resend.dev>';
+    const to = params.to || process.env.EMAIL_TEST_OVERRIDE;
+    const replyTo = process.env.RESEND_REPLY_TO_EMAIL || 'victorhsltech@gmail.com';
+
+    const payload: any = {
+      from: fromEmail,
+      to: [to],
+      reply_to: replyTo,
+      subject: `Fatura de Locação ${params.faturaNumber ? `Nº ${params.faturaNumber} ` : ''}- ${params.companyName}`,
+      html: buildFaturaLocacaoEmailTemplate(params, replyTo),
+    };
+
+    if (params.pdfBase64 && params.pdfFilename) {
+      payload.attachments = [{
+        filename: params.pdfFilename,
+        content: params.pdfBase64,
+      }];
+    }
+
+    await this.http.post(
+      '/emails',
+      payload,
       { headers: { Authorization: `Bearer ${apiKey}` } }
     );
   }

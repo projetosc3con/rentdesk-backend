@@ -51,6 +51,7 @@ app.use('/api/rentals', authenticate, rentalRoutes);
 app.use('/api/equipments', authenticate, equipmentRoutes);
 app.use('/api/clients', authenticate, clientRoutes);
 app.use('/api/parts', authenticate, partRoutes);
+app.use('/api/materials', authenticate, partRoutes);
 app.use('/api/service-orders', authenticate, serviceOrderRoutes);
 app.use('/api/users', authenticate, userRoutes);
 app.use('/api/exports', authenticate, exportRoutes);

@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { getSupabaseUserClient } from '../config/supabase';
+import { recordStockMovement } from '../services/stockMovementService';
 
 const SERVICE_ORDER_SELECT = '*, service_order_parts(*, parts(*)), service_order_labor(*)';
 
@@ -95,14 +96,36 @@ export const createServiceOrder = async (req: AuthRequest, res: Response) => {
 
         if (partsError) throw partsError;
 
-        // 4. Update parts stock
+        // 4. Update parts stock and record SAIDA audit log
         for (const p of parts) {
-            const { data: part } = await supabase.from('parts').select('quantity').eq('id', p.part_id).single();
+            const { data: part } = await supabase
+                .from('parts')
+                .select('id, quantity, unit_value, description, internal_code')
+                .eq('id', p.part_id)
+                .single();
             if (part) {
+                const prevStock = Number(part.quantity) || 0;
+                const qtyUsed = Number(p.quantity_used) || 0;
+                const newStock = prevStock - qtyUsed;
+
                 await supabase
                     .from('parts')
-                    .update({ quantity: (part.quantity || 0) - p.quantity_used })
+                    .update({ quantity: newStock })
                     .eq('id', p.part_id);
+
+                await recordStockMovement(supabase, {
+                    part_id: p.part_id,
+                    movement_type: 'SAIDA',
+                    quantity: qtyUsed,
+                    unit_value: p.unit_value_at_use || part.unit_value || 0,
+                    previous_stock: prevStock,
+                    new_stock: newStock,
+                    reference_type: 'SERVICE_ORDER',
+                    reference_id: os.id,
+                    reference_label: `OS #${os.os_number || os.id.slice(0, 8)}`,
+                    notes: `Aplicação de material na OS #${os.os_number || ''} (${osData.equipment_name || 'Equipamento'}).`,
+                    created_by: req.user?.id || null,
+                });
             }
         }
     }
@@ -240,7 +263,7 @@ export const updateServiceOrder = async (req: AuthRequest, res: Response) => {
 
         // 3. Replace parts: update stock, delete old service_order_parts, insert new
         if (parts && Array.isArray(parts)) {
-            // Apply stock updates
+            // Apply stock updates and audit logs
             for (const partId of affectedPartIds) {
                 const oldQty = oldQuantities[partId] || 0;
                 const newQty = newQuantities[partId] || 0;
@@ -248,12 +271,32 @@ export const updateServiceOrder = async (req: AuthRequest, res: Response) => {
 
                 if (diff !== 0) {
                     const dbPart = stockQuantities[partId];
-                    const currentStock = dbPart ? dbPart.quantity : 0;
+                    const currentStock = dbPart ? (Number(dbPart.quantity) || 0) : 0;
+                    const newStock = currentStock - diff;
                     
                     await supabase
                         .from('parts')
-                        .update({ quantity: currentStock - diff })
+                        .update({ quantity: newStock })
                         .eq('id', partId);
+
+                    const movementType = diff > 0 ? 'SAIDA' : 'ENTRADA';
+                    const movementQty = Math.abs(diff);
+
+                    const osId = String(id);
+                    await recordStockMovement(supabase, {
+                        part_id: partId,
+                        movement_type: movementType,
+                        quantity: movementQty,
+                        previous_stock: currentStock,
+                        new_stock: newStock,
+                        reference_type: 'SERVICE_ORDER',
+                        reference_id: osId,
+                        reference_label: `OS #${osData.os_number || osId.slice(0, 8)}`,
+                        notes: diff > 0
+                            ? `Consumo adicional de peça na OS #${osData.os_number || osId.slice(0, 8)}.`
+                            : `Estorno/devolução de peça na OS #${osData.os_number || osId.slice(0, 8)}.`,
+                        created_by: req.user?.id || null,
+                    });
                 }
             }
 
