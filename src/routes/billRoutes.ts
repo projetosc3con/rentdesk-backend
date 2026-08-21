@@ -5,8 +5,10 @@ import { authorize } from '../middleware/auth';
 
 const router = Router();
 
-// 'Admin' e 'Administrador' aceitos por divergência de string entre módulos — ver PROJECT_REFERENCE.md §4.4/11.3
-const fullAccess = authorize(['Admin', 'Administrador', 'Diretoria', 'Gerente']);
+// Acesso irrestrito: Administrador/Diretoria/Gerente. Financeiro: ler e
+// alterar sem excluir (não há endpoint de exclusão em bills, então entra
+// no mesmo nível) — critério confirmado com o Victor em 19/08/2026.
+const fullAccess = authorize(['Administrador', 'Diretoria', 'Gerente', 'Financeiro']);
 
 // Conciliação bancária — dado financeiro cross-cliente, mesmo nível de acesso
 // das demais rotas sensíveis (ver TODO(SECURITY) em billController.ts sobre
