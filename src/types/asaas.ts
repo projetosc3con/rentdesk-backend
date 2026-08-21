@@ -68,16 +68,48 @@ export interface AsaasReceiveInCashRequest {
 
 export type AsaasReceiveInCashResponse = AsaasPaymentResponse;
 
-// --- Payload de webhook (pagamentos e notas fiscais) ---
+// --- Payload de webhook (pagamentos, notas fiscais e transferências) ---
 // Best-effort: doc colada não trouxe o envelope de webhook. Validar o nome do
 // campo id (chave de dedup para asaas_webhook_logs.event_id) contra a doc real
-// antes de confiar nele. payment/invoice são mutuamente exclusivos: eventos
-// PAYMENT_* trazem `payment`, eventos INVOICE_* trazem `invoice`.
+// antes de confiar nele. payment/invoice/transfer são mutuamente exclusivos:
+// eventos PAYMENT_* trazem `payment`, INVOICE_* trazem `invoice`, TRANSFER_*
+// trazem `transfer`.
 export interface AsaasWebhookPayload {
   id: string; // assumido como id único do evento -> event_id
-  event: string; // ex: 'PAYMENT_RECEIVED', 'INVOICE_AUTHORIZED'
+  event: string; // ex: 'PAYMENT_RECEIVED', 'INVOICE_AUTHORIZED', 'TRANSFER_DONE'
   payment?: AsaasPaymentResponse;
   invoice?: AsaasInvoiceResponse;
+  transfer?: AsaasTransferResponse;
+}
+
+// --- Transferência (POST /v3/transfers) --- (best-effort, validar contra doc oficial do Asaas antes de produção)
+export type AsaasTransferStatus =
+  | 'PENDING' | 'BANK_PROCESSING' | 'DONE' | 'FAILED' | 'CANCELLED';
+
+export interface AsaasTransferRequest {
+  value: number;
+  pixAddressKey: string;
+  pixAddressKeyType: 'CPF' | 'CNPJ' | 'EMAIL' | 'PHONE' | 'EVP';
+  description?: string;
+  externalReference?: string; // sugestão: payments.id
+}
+
+export interface AsaasTransferResponse {
+  id: string; // -> persistir em bills.asaas_transfer_id
+  status: AsaasTransferStatus;
+  value: number;
+  netValue?: number;
+  transferFee?: number;
+  effectiveDate?: string | null; // -> bills.bank_transaction_date quando status=DONE
+  endToEndIdentifier?: string | null; // -> bills.pix_end_to_end_id quando status=DONE
+  failReason?: string | null;
+}
+
+// --- Payload do mecanismo de validação de saque (Integrações > Mecanismos de
+// Segurança no painel Asaas) — POST síncrono, espera resposta em segundos.
+export interface AsaasWithdrawValidationPayload {
+  type: 'TRANSFER' | 'BILL' | 'PIX_QR_CODE' | 'MOBILE_PHONE_RECHARGE' | 'PIX_REFUND';
+  transfer?: AsaasTransferResponse;
 }
 
 // --- Nota fiscal de serviço (POST /v3/invoices) --- (best-effort, validar contra doc oficial do Asaas)

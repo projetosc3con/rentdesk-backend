@@ -17,13 +17,13 @@ import { normalizeBill, normalizePendingPayment } from '../utils/billNormalizers
 //      `rental_invoices` como referência).
 //   3. Remover este comentário quando a policy estiver validada em produção.
 //
-// Extrato bancário: mescla `bills` (já conciliado, automático via webhook
+// Extrato bancário: mescla `bills` (já lançado, automático via webhook
 // Asaas ou manual) com `payments` ainda sem bill vinculado (cobrança Asaas
-// em aberto — ver createBillAndTransferPix em asaasWebhookController.ts).
+// em aberto — ver createBillFromPayment em asaasWebhookController.ts).
 // Um payment só some daqui quando o bill correspondente é criado de fato
-// (não quando payments.status muda pra RECEIVED), porque o repasse BB pode
-// falhar entre as duas coisas — nesse caso o payment deve continuar
-// aparecendo até o bill existir.
+// (não quando payments.status muda pra RECEIVED), porque o pedido de
+// repasse ao Asaas pode falhar entre as duas coisas — nesse caso o payment
+// deve continuar aparecendo até o bill existir.
 export const listBills = async (req: AuthRequest, res: Response) => {
   try {
     const supabase = getSupabaseUserClient(req.token!);

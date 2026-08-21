@@ -1,9 +1,9 @@
 import { Request, Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AsaasWebhookPayload } from '../types/asaas';
-import { bbPixService } from '../services/bbPixService';
 import { emitNfseCore } from './fiscalController';
 import { emailService } from '../services/emailService';
+import { asaasService } from '../services/asaasService';
 
 const FAILED_NFSE_STATUSES = ['ERRO', 'ERROR'];
 
@@ -47,7 +47,11 @@ export const handleAsaasWebhook = async (req: Request, res: Response) => {
       try {
         await markPaymentAsPaid(payload);
       } catch (processingError: any) {
-        console.error('[handleAsaasWebhook] Erro ao processar baixa:', processingError.message);
+        console.error('[handleAsaasWebhook] Erro ao processar baixa:', {
+          status: processingError.response?.status,
+          data: processingError.response?.data,
+          message: processingError.message,
+        });
       }
     } else if (payload.event?.startsWith('INVOICE_') && payload.invoice?.id) {
       try {
@@ -55,6 +59,13 @@ export const handleAsaasWebhook = async (req: Request, res: Response) => {
         await supabaseAdmin.from('asaas_webhook_logs').update({ processed: true }).eq('event_id', payload.id);
       } catch (processingError: any) {
         console.error('[handleAsaasWebhook] Erro ao processar evento de nota fiscal:', processingError.message);
+      }
+    } else if (payload.event?.startsWith('TRANSFER_') && payload.transfer?.id) {
+      try {
+        await handleTransferEvent(payload);
+        await supabaseAdmin.from('asaas_webhook_logs').update({ processed: true }).eq('event_id', payload.id);
+      } catch (processingError: any) {
+        console.error('[handleAsaasWebhook] Erro ao processar evento de transferência:', processingError.message);
       }
     }
 
@@ -155,11 +166,11 @@ async function markPaymentAsPaid(payload: AsaasWebhookPayload) {
     .eq('id', payment.id);
   if (paymentError) throw paymentError;
 
-  // Repasse PIX + bill conciliado só quando o valor está de fato disponível
-  // no saldo Asaas (PAYMENT_RECEIVED) — PAYMENT_CONFIRMED não garante saldo
-  // (ver doc oficial Asaas: "saldo ainda não foi disponibilizado").
+  // Lançamento em bills só quando o valor está de fato disponível no saldo
+  // Asaas (PAYMENT_RECEIVED) — PAYMENT_CONFIRMED não garante saldo (ver doc
+  // oficial Asaas: "saldo ainda não foi disponibilizado").
   if (payload.event === 'PAYMENT_RECEIVED') {
-    await createBillAndTransferPix(payment, payload, realNetValue);
+    await createBillFromPayment(payment, payload, realNetValue);
   }
 
   // NF-e continua no primeiro evento pago (CONFIRMED ou RECEIVED) — pedido
@@ -175,16 +186,27 @@ async function markPaymentAsPaid(payload: AsaasWebhookPayload) {
   if (logError) throw logError;
 }
 
-// Repasse do valor liquido pro BB + registro em bills ja conciliado. Roda
-// depois da baixa em payments e antes de marcar o log como processed=true:
-// se falhar aqui, o log fica com processed=false (sinaliza que precisa de
-// atencao), em vez de esconder que o repasse/lancamento nao aconteceu.
+// Registro em bills a partir de um pagamento confirmado no Asaas, seguido do
+// pedido de repasse (POST /v3/transfers no próprio Asaas — não no BB: o
+// dinheiro do cliente está no saldo do Asaas, e só o Asaas pode mandar esse
+// saldo pra fora; uma transferência PIX de saída do BB não tem como "puxar"
+// um valor que nunca esteve lá — ver INTEGRACOES_ASAAS_BB.md §1.1 sobre o
+// repasse via bbPixService removido). Roda depois da baixa em payments e
+// antes de marcar o log como processed=true: se o INSERT em bills falhar, o
+// log fica com processed=false (sinaliza atenção manual).
 //
-// Idempotencia: só PAYMENT_RECEIVED chama essa função (ver markPaymentAsPaid),
+// O pedido de transferência em si é best-effort e NÃO bloqueia o resto do
+// fluxo (NFS-e) se falhar — erro só é logado. `bank_transaction_date`/
+// `pix_end_to_end_id` nascem null e só são preenchidos quando o evento
+// TRANSFER_DONE chegar (ver handleTransferEvent) ou, pra recebimentos fora
+// desse fluxo, quando a conciliação bancária real bater contra o extrato do
+// BB (bankReconciliationController).
+//
+// Idempotência: só PAYMENT_RECEIVED chama essa função (ver markPaymentAsPaid),
 // mas o Asaas pode reentregar o mesmo evento mais de uma vez - o check por
-// payment_id roda ANTES de chamar o BB, nao so antes do insert, pra nao gerar
-// um segundo PIX nem uma segunda linha em bills numa reentrega.
-async function createBillAndTransferPix(
+// payment_id evita uma segunda linha em bills (e um segundo pedido de
+// transferência) numa reentrega.
+async function createBillFromPayment(
   payment: { id: string; invoice_id: string; client_id: string; due_date: string },
   payload: AsaasWebhookPayload,
   realNetValue: number | null
@@ -196,47 +218,132 @@ async function createBillAndTransferPix(
     .maybeSingle();
 
   if (existingBill) {
-    console.log(`[createBillAndTransferPix] bill ja existe para payment_id=${payment.id} (event ${payload.event} reenviado) - pulando`);
+    console.log(`[createBillFromPayment] bill ja existe para payment_id=${payment.id} (event ${payload.event} reenviado) - pulando`);
     return;
   }
 
   const paymentPayload = payload.payment!;
   const netValue = realNetValue ?? paymentPayload.netValue ?? paymentPayload.value;
 
+  const { data: bill, error: billError } = await supabaseAdmin
+    .from('bills')
+    .insert({
+      origin: 'ASAAS',
+      type: 'receivable',
+      rental_invoice_id: payment.invoice_id,
+      payment_id: payment.id,
+      client_id: payment.client_id,
+      gross_value: paymentPayload.value,
+      net_value: netValue,
+      fee_amount: paymentPayload.value - netValue,
+      due_date: payment.due_date,
+      pix_end_to_end_id: null,
+      bank_transaction_date: null,
+      bank_raw_snapshot: null,
+      asaas_transfer_id: null,
+      status: 'Recebido',
+      reconciled_at: new Date().toISOString(),
+    })
+    .select('id')
+    .single();
+  if (billError) throw billError;
+
+  try {
+    await requestTransfer(bill.id, payment.id, netValue);
+  } catch (transferError: any) {
+    console.error(`[createBillFromPayment] Falha ao pedir repasse pro bill ${bill.id}:`, {
+      status: transferError.response?.status,
+      data: transferError.response?.data,
+      message: transferError.message,
+    });
+  }
+}
+
+// Pede ao Asaas pra transferir o valor líquido pra chave Pix cadastrada em
+// erp_company_settings.bank_pix_key. A resposta costuma vir PENDING/
+// BANK_PROCESSING (não DONE) — só grava o id da transferência no bill pra
+// permitir: (a) o endpoint de validação de saque reconhecer o pedido como
+// nosso (ver asaasTransferApprovalController.ts) e (b) o evento TRANSFER_DONE
+// achar o bill certo depois.
+async function requestTransfer(billId: string, paymentId: string, netValue: number) {
   const { data: settings } = await supabaseAdmin
     .from('erp_company_settings')
-    .select('bank_code, bank_agency, bank_account, bank_pix_key')
+    .select('asaas_api_key, bank_pix_key, bank_pix_key_type')
     .eq('active', true)
     .single();
 
-  const transfer = await bbPixService.transferNetValueToBB({
-    paymentId: payment.id,
+  if (!settings?.asaas_api_key || !settings?.bank_pix_key || !settings?.bank_pix_key_type) {
+    console.warn(`[requestTransfer] erp_company_settings sem asaas_api_key/bank_pix_key/bank_pix_key_type configurados — pulando repasse do bill ${billId} (ver sql/2026-08-20_bills_asaas_transfer.sql)`);
+    return;
+  }
+
+  const transfer = await asaasService.createTransfer(settings.asaas_api_key, {
     value: netValue,
-    destination: {
-      bankCode: settings?.bank_code ?? null,
-      agency: settings?.bank_agency ?? null,
-      account: settings?.bank_account ?? null,
-      pixKey: settings?.bank_pix_key ?? null,
-    },
+    pixAddressKey: settings.bank_pix_key,
+    pixAddressKeyType: settings.bank_pix_key_type,
+    description: `Repasse locação RentDesk - payment ${paymentId}`,
+    externalReference: paymentId,
   });
 
-  const { error: billError } = await supabaseAdmin.from('bills').insert({
-    origin: 'ASAAS',
-    type: 'receivable',
-    rental_invoice_id: payment.invoice_id,
-    payment_id: payment.id,
-    client_id: payment.client_id,
-    gross_value: paymentPayload.value,
-    net_value: netValue,
-    fee_amount: paymentPayload.value - netValue,
-    due_date: payment.due_date,
-    pix_end_to_end_id: transfer.endToEndId,
-    bank_transaction_date: transfer.transferDate,
-    bank_raw_snapshot: transfer.raw,
-    status: 'Recebido',
-    reconciled_at: new Date().toISOString(),
-  });
-  if (billError) throw billError;
+  const { error: updateError } = await supabaseAdmin
+    .from('bills')
+    .update({
+      asaas_transfer_id: transfer.id,
+      // Na hipótese (rara) de já vir DONE na resposta síncrona, grava direto
+      // — senão fica pro evento TRANSFER_DONE atualizar depois.
+      ...(transfer.status === 'DONE'
+        ? {
+            pix_end_to_end_id: transfer.endToEndIdentifier ?? null,
+            bank_transaction_date: transfer.effectiveDate ?? null,
+            bank_raw_snapshot: transfer,
+          }
+        : {}),
+    })
+    .eq('id', billId);
+  if (updateError) throw updateError;
+}
+
+// Eventos de transferência (TRANSFER_CREATED/PENDING/IN_BANK_PROCESSING/
+// BLOCKED/DONE/FAILED/CANCELLED) — só TRANSFER_DONE de fato marca o bill como
+// conciliado com o banco; os demais só são logados (mesmo padrão de
+// visibilidade usado pros outros gaps documentados neste arquivo).
+async function handleTransferEvent(payload: AsaasWebhookPayload) {
+  const transfer = payload.transfer!;
+
+  const { data: bill } = await supabaseAdmin
+    .from('bills')
+    .select('id')
+    .eq('asaas_transfer_id', transfer.id)
+    .maybeSingle();
+
+  if (!bill) {
+    console.warn(`[handleTransferEvent] Nenhum bill local para asaas_transfer_id=${transfer.id} (evento ${payload.event})`);
+    return;
+  }
+
+  if (payload.event === 'TRANSFER_DONE') {
+    const { error } = await supabaseAdmin
+      .from('bills')
+      .update({
+        pix_end_to_end_id: transfer.endToEndIdentifier ?? null,
+        bank_transaction_date: transfer.effectiveDate ?? null,
+        bank_raw_snapshot: transfer,
+        reconciled_at: new Date().toISOString(),
+      })
+      .eq('id', bill.id);
+    if (error) throw error;
+    return;
+  }
+
+  if (['TRANSFER_FAILED', 'TRANSFER_CANCELLED', 'TRANSFER_BLOCKED'].includes(payload.event)) {
+    // bills.status tem CHECK constraint fixo (Pendente/Atrasado/Recebido/
+    // Divergente/No prazo — ver comentário em billController.createBill) sem
+    // nenhum valor pra "falha no repasse", então não dá pra sinalizar isso
+    // no status sem violar a constraint — fica só o log mesmo, pra
+    // acompanhamento manual (mesmo tipo de gap já documentado nos outros
+    // eventos deste webhook).
+    console.warn(`[handleTransferEvent] Repasse falhou/cancelado pro bill ${bill.id} (evento ${payload.event}): ${transfer.failReason ?? 'sem motivo informado'}`);
+  }
 }
 
 // Emite a NFS-e automaticamente quando o pagamento é confirmado (pedido do

@@ -4,6 +4,7 @@ import {
   AsaasChargeRequest, AsaasPaymentResponse,
   AsaasReceiveInCashRequest, AsaasReceiveInCashResponse,
   AsaasInvoiceRequest, AsaasInvoiceResponse,
+  AsaasTransferRequest, AsaasTransferResponse,
 } from '../types/asaas';
 
 const ASAAS_BASE_URL = process.env.ASAAS_BASE_URL || 'https://api-sandbox.asaas.com';
@@ -75,6 +76,18 @@ class AsaasService {
   async getInvoice(apiKey: string, invoiceId: string): Promise<AsaasInvoiceResponse> {
     const { data: response } = await this.http.get<AsaasInvoiceResponse>(
       `/v3/invoices/${invoiceId}`, this.authHeaders(apiKey)
+    );
+    return response;
+  }
+
+  // Transfere saldo da conta Asaas pra uma chave Pix externa — é essa chamada
+  // (e não nenhuma API do BB) que efetivamente move o valor recebido pra fora
+  // do Asaas. A resposta costuma vir com status PENDING/BANK_PROCESSING, não
+  // DONE — o resultado final chega depois via webhook (evento TRANSFER_DONE/
+  // TRANSFER_FAILED, ver asaasWebhookController.handleTransferEvent).
+  async createTransfer(apiKey: string, data: AsaasTransferRequest): Promise<AsaasTransferResponse> {
+    const { data: response } = await this.http.post<AsaasTransferResponse>(
+      '/v3/transfers', data, this.authHeaders(apiKey)
     );
     return response;
   }

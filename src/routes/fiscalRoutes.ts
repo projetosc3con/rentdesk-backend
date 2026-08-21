@@ -4,10 +4,11 @@ import { authorize } from '../middleware/auth';
 
 const router = Router();
 
-// 'Admin' e 'Administrador' aceitos por divergência de string entre módulos — ver PROJECT_REFERENCE.md
-const fullAccess = authorize(['Admin', 'Administrador', 'Diretoria', 'Gerente']);
+// Acesso irrestrito: Administrador/Diretoria/Gerente. Financeiro: ler e
+// alterar sem excluir. Critério confirmado com o Victor em 19/08/2026.
+const fullAccess = authorize(['Administrador', 'Diretoria', 'Gerente', 'Financeiro']);
 
 router.post('/invoices/:id/nfse', fullAccess, emitNfse);
-router.get('/invoices/:id/nfse', getNfseStatus);
+router.get('/invoices/:id/nfse', fullAccess, getNfseStatus);
 
 export default router;

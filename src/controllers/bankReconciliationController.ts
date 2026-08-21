@@ -110,21 +110,23 @@ export const reconcileBankStatement = async (req: AuthRequest, res: Response) =>
 
     for (const line of lines) {
       // Match forte: `unique_transaction_id` do extrato (identificador único
-      // da transação no BB) bate exatamente com `bills.pix_end_to_end_id`
-      // (gravado só quando o repasse PIX real acontece — ver bbPixService).
+      // da transação no BB) bate exatamente com `bills.pix_end_to_end_id`.
       // É autoritativo: pula o critério frouxo abaixo por completo, então
       // não sofre com colisão de tipo+data+valor entre bills diferentes
       // (ex: dois clientes com parcela do mesmo valor vencendo na mesma
       // semana — sem esse match forte, o critério frouxo pode casar com o
       // bill errado e sobrescrever os dados dele com os dessa linha).
+      // Hoje `pix_end_to_end_id` só é preenchido em bills lançados manualmente
+      // com esse dado à mão — bills de origin=ASAAS nascem sempre com esse
+      // campo null (não existe mais repasse PIX automático, ver
+      // asaasWebhookController.createBillFromPayment), então praticamente
+      // todo match de bill ASAAS cai no fallback frouxo abaixo.
       let matchIndex = line.unique_transaction_id
         ? availableCandidates.findIndex((bill) => bill.pix_end_to_end_id === line.unique_transaction_id)
         : -1;
 
-      // Fallback frouxo: só entra em jogo quando não há identificador forte
-      // dos dois lados — bill manual (nunca tem pix_end_to_end_id) ou repasse
-      // PIX ainda simulado (ENABLE_BB_PIX_TRANSFER=false não grava endToEndId
-      // real). Mantém o comportamento anterior pra esses casos.
+      // Fallback frouxo: entra em jogo sempre que não há identificador forte
+      // dos dois lados (hoje, praticamente sempre — ver comentário acima).
       if (matchIndex === -1) {
         matchIndex = availableCandidates.findIndex((bill) =>
           bill.type === line.type &&
